@@ -69,7 +69,7 @@ fn parse(line: &str) -> Option<Cmd> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("用法: engine <module.cbe> [--fps 30] [--no-audio]");
+        eprintln!("用法: engine <module.cbe> [--fps 30] [--vclock]");
         std::process::exit(2);
     }
     let fps0: u64 = args
