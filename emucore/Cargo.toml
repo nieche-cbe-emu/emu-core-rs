@@ -7,7 +7,8 @@ description = "CoolBar 模拟器核心：ARMv5TE + 宿主 ABI"
 
 [dependencies]
 cbelib = { path = "../cbelib" }
-unicorn-engine = "2.1"
+
+unicorn-engine = { version = "2.1", default-features = false, features = ["arch_arm"] }
 
 capstone = "0.13"
 
