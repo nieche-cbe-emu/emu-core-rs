@@ -2,6 +2,8 @@
 use std::collections::HashMap;
 
 const RAW: &[u8] = include_bytes!("font12.cbef");
+
+pub static FONT_LICENSE: &str = include_str!("FONT-LICENSE.txt");
 const MAGIC: &[u8] = b"CBEF";
 
 pub struct Font {
@@ -21,6 +23,8 @@ pub struct Font {
 impl Font {
     pub fn load() -> Option<Font> {
         let d = RAW;
+
+        std::hint::black_box(FONT_LICENSE);
         if d.len() < 18 || &d[..4] != MAGIC {
             return None;
         }
