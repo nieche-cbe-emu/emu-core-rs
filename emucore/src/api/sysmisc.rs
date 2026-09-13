@@ -12,6 +12,16 @@ pub fn billing_paynum(uc: &mut Emu) {
     uc.ret(0);
 }
 
+pub fn billing_send_sms(uc: &mut Emu) {
+    if uc.arg(0) != 14 {
+        uc.ret(0);
+        return;
+    }
+    let cb = uc.arg(6);
+    runtime::defer(uc, cb, vec![0], "smsResult");
+    uc.ret(1);
+}
+
 pub fn main_screen_image(uc: &mut Emu) {
     let img = uc.get_data().rt.gfx.img;
     uc.ret(img);

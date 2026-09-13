@@ -20,7 +20,7 @@ pub mod off {
 const METHODS: &[(u32, &str, crate::machine::ApiFn)] = &[
     (0x20, "DP_LoadPackage", dp_load),
     (0x24, "DP_ReleasePackage", dp_release),
-    (0x28, "DP_LoadFromTResource", dp_load),
+    (0x28, "DP_LoadFromTResource", dp_load_tres),
     (0x2c, "DP_LoadFormTCard", dp_load),
     (0x30, "DP_DoLoading", dp_noop),
     (0x34, "DP_LocateDataPackage", dp_locate),
@@ -57,6 +57,13 @@ pub fn init_df_datapackage(uc: &mut Emu) {
         crate::api::fill(uc, subs, 0, n);
     }
     uc.w32(pkg + off::SUB_DATA_PACKAGE, subs);
+    {
+        let w = &mut uc.get_data_mut().rt.pkg_wanted;
+        match w.iter_mut().find(|(k, _)| *k == pkg) {
+            Some(e) => e.1.clear(),
+            None => w.push((pkg, Vec::new())),
+        }
+    }
 
     uc.write(pkg + off::SUB_PACKAGE_NUM, &(nsub as u16).to_le_bytes());
     for &(o, name, f) in METHODS {
@@ -185,18 +192,114 @@ pub fn dp_load(uc: &mut Emu) {
     let name = String::from_utf8_lossy(&raw).to_string();
     let (key, ents) = pick_entries(uc, &name);
     materialize(uc, pkg, &key, &ents);
+    set_pkg_entries(uc, pkg, &ents);
+    if !name.is_empty() {
+        let w = &mut uc.get_data_mut().rt.pkg_wanted;
+        match w.iter_mut().find(|(k, _)| *k == pkg) {
+            Some(e) => {
+                if !e.1.contains(&name) {
+                    e.1.push(name);
+                }
+            }
+            None => w.push((pkg, vec![name])),
+        }
+    }
+    uc.w32(pkg + off::PACKAGE_NAME, nameptr);
+    uc.ret(0);
+}
+
+fn set_pkg_entries(uc: &mut Emu, pkg: u32, ents: &[(String, Vec<u8>)]) {
     let names: Vec<(String, u32)> = ents
         .iter()
         .map(|(n, d)| (n.clone(), d.len() as u32))
         .collect();
-    {
-        let v = &mut uc.get_data_mut().rt.pkg_entries;
-        match v.iter_mut().find(|(k, _)| *k == pkg) {
-            Some(e) => e.1 = names,
-            None => v.push((pkg, names)),
+    let v = &mut uc.get_data_mut().rt.pkg_entries;
+    match v.iter_mut().find(|(k, _)| *k == pkg) {
+        Some(e) => e.1 = names,
+        None => v.push((pkg, names)),
+    }
+}
+
+fn stream_packages(uc: &Emu, ptr: u32) -> Option<Vec<(String, cbelib::ResArchive)>> {
+    let head = uc.read_upto(ptr, 12);
+    if head.len() < 12 {
+        return None;
+    }
+    let rd = |b: &[u8], o: usize| -> Option<usize> {
+        Some(u32::from_le_bytes(b.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let hlen = rd(&head, 0)?;
+    let count = rd(&head, 8)?;
+    if !(1..512).contains(&count) || !(8..0x4000).contains(&hlen) {
+        return None;
+    }
+    let hdr = uc.read_upto(ptr, hlen + 4 + 8);
+    if hdr.len() < hlen + 4 {
+        return None;
+    }
+    let mut offs = vec![hlen + 4];
+    let mut o = 12;
+    while o < hlen + 4 {
+        let ln = *hdr.get(o)? as usize;
+        offs.push(rd(&hdr, o + 1 + ln)?);
+        o += 1 + ln + 4;
+    }
+    let last = *offs.iter().max()?;
+    let tail = uc.read_upto(ptr + last as u32, 8);
+    let total = last + 4 + rd(&tail, 0)? + rd(&tail, 4)?;
+    let buf = uc.read_upto(ptr, total);
+    if buf.len() != total {
+        return None;
+    }
+    cbelib::container::parse_multi(&buf, 0, total)
+}
+
+pub fn dp_load_tres(uc: &mut Emu) {
+    let pkg = uc.arg(0);
+    let ptr = uc.arg(1);
+    let packs = if ptr != 0 { stream_packages(uc, ptr) } else { None };
+    let Some(packs) = packs else {
+        dp_load(uc);
+        return;
+    };
+    let wanted: Vec<String> = uc
+        .get_data()
+        .rt
+        .pkg_wanted
+        .iter()
+        .find(|(k, _)| *k == pkg)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let mut ents: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut add = |a: &cbelib::ResArchive| {
+        for e in &a.entries {
+            match pos.get(&e.name) {
+                Some(&i) => ents[i] = (e.name.clone(), e.data.clone()),
+                None => {
+                    pos.insert(e.name.clone(), ents.len());
+                    ents.push((e.name.clone(), e.data.clone()));
+                }
+            }
+        }
+    };
+    let mut any = false;
+    if let Some((_, r)) = packs.iter().find(|(k, _)| k.is_empty()) {
+        add(r);
+        any = true;
+    }
+    for nm in &wanted {
+        if let Some((_, a)) = packs.iter().find(|(k, _)| k == nm) {
+            add(a);
+            any = true;
         }
     }
-    uc.w32(pkg + off::PACKAGE_NAME, nameptr);
+    if !any {
+        add(&packs[0].1);
+    }
+    let key = format!("<tres>{ptr:#x}:{}", wanted.join("|"));
+    materialize(uc, pkg, &key, &ents);
+    set_pkg_entries(uc, pkg, &ents);
     uc.ret(0);
 }
 
@@ -217,7 +320,7 @@ pub fn dp_locate(uc: &mut Emu) {
 
 pub fn entries_opt(uc: &Emu, pkg: Option<u32>) -> Vec<(String, u32)> {
     let rt = &uc.get_data().rt;
-    if let Some(p) = pkg {
+    if let Some(p) = pkg.or(Some(rt.datapackage).filter(|&d| d != 0)) {
         if let Some((_, v)) = rt.pkg_entries.iter().find(|(k, _)| *k == p) {
             return v.clone();
         }

@@ -99,6 +99,7 @@ pub static ENTRIES: &[Entry] = &[
     e!(GAME_T, "SCREEN_IsPointerDrag", misc::pointer_drag),
 
     e!(BILL_T, "BILLING_GetPayNumByAppId", sysmisc::billing_paynum),
+    e!(BILL_T, "Billing_SendSpecSms", sysmisc::billing_send_sms),
     e!(SYS_T, "GetCoolBarKernelCurrentVersion", sysmisc::kernel_ver),
     e!(SYS_T, "VMGetOperator", sysmisc::zero),
     e!(SYS_T, "vMGetKeyNum", sysmisc::zero),

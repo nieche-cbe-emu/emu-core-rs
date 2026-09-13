@@ -112,6 +112,8 @@ pub struct Rt {
     pub dp_cache: HashMap<String, (u32, u32, u32, u32)>,
 
     pub pkg_entries: Vec<(u32, Vec<(String, u32)>)>,
+
+    pub pkg_wanted: Vec<(u32, Vec<String>)>,
     pub logs: Vec<String>,
 }
 
@@ -176,6 +178,7 @@ impl Rt {
             packages: Vec::new(),
             dp_cache: HashMap::new(),
             pkg_entries: Vec::new(),
+            pkg_wanted: Vec::new(),
             logs: Vec::new(),
         }
     }
