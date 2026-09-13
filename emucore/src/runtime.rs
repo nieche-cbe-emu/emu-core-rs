@@ -512,10 +512,7 @@ pub fn setup(uc: &mut Emu, m: &cbelib::CbeModule) {
         let home = std::env::var("NIECHE_HOME")
             .or_else(|_| std::env::var("NICAI_HOME"))
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| {
-                std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                    .join(".nieche-emu")
-            });
+            .unwrap_or_else(|_| user_home().join(".nieche-emu"));
         let safe: String = m
             .name
             .chars()
@@ -874,4 +871,12 @@ pub fn install(uc: &mut Emu, addr: u32, name: &'static str, f: machine::ApiFn) {
         }
     };
     uc.w32(addr, t);
+}
+
+pub fn user_home() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
 }

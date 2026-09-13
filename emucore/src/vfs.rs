@@ -27,6 +27,10 @@ impl Vfs {
     pub fn new(root: PathBuf, base: Option<PathBuf>) -> Vfs {
         let _ = std::fs::create_dir_all(&root);
         let base = base.filter(|b| b.is_dir());
+
+        if base.is_none() {
+            let _ = std::fs::create_dir_all(root.join(crate::api::fileio::COOLBAR_DIR));
+        }
         Vfs {
             root,
             base,
@@ -48,17 +52,17 @@ impl Vfs {
     }
 
     pub fn host_path(&self, path: &str) -> PathBuf {
-        self.root.join(Self::norm(path))
+        ci_join(&self.root, &Self::norm(path))
     }
 
     pub fn resolve(&self, path: &str) -> PathBuf {
         let rel = Self::norm(path);
-        let over = self.root.join(&rel);
+        let over = ci_join(&self.root, &rel);
         if over.exists() {
             return over;
         }
         if let Some(b) = &self.base {
-            let p = b.join(&rel);
+            let p = ci_join(b, &rel);
             if p.exists() {
                 return p;
             }
@@ -191,8 +195,71 @@ impl Vfs {
     }
 }
 
+fn ci_join(base: &Path, rel: &str) -> PathBuf {
+    let mut cur = base.to_path_buf();
+    let mut parts = rel.split('/').filter(|c| !c.is_empty()).peekable();
+    while let Some(comp) = parts.next() {
+        let exact = cur.join(comp);
+        if exact.exists() {
+            cur = exact;
+            continue;
+        }
+        let want = comp.to_lowercase();
+        let hit = std::fs::read_dir(&cur).ok().and_then(|rd| {
+            rd.filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .find(|n| n.to_string_lossy().to_lowercase() == want)
+        });
+        match hit {
+            Some(n) => cur = cur.join(n),
+            None => {
+
+                cur = exact;
+                for rest in parts {
+                    cur = cur.join(rest);
+                }
+                break;
+            }
+        }
+    }
+    cur
+}
+
 fn mkparent(p: &Path) {
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_insensitive_like_fat() {
+        let tmp = std::env::temp_dir().join(format!("nieche-vfs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut v = Vfs::new(tmp.clone(), None);
+
+        let h = v.open(".system/MB_MSTAR_WQVGA\\IsLet1.dat", "w+");
+        assert_ne!(h, OPEN_FAIL);
+        v.write(h, b"save");
+        v.close(h);
+
+        assert!(v.exists(".system/MB_MSTAR_WQVGA\\Islet1.dat"), "换大小写要找得到");
+        assert!(v.exists(".SYSTEM/mb_mstar_wqvga\\ISLET1.DAT"), "目录层级也要不敏感");
+
+        let h = v.open(".system/MB_MSTAR_WQVGA\\Islet1.dat", "r");
+        assert_ne!(h, OPEN_FAIL);
+        assert_eq!(v.read(h, 16), b"save");
+        v.close(h);
+
+        let h = v.open(".system/MB_MSTAR_WQVGA\\ISLET1.DAT", "w+");
+        v.write(h, b"v2");
+        v.close(h);
+        let n = std::fs::read_dir(tmp.join(".system/MB_MSTAR_WQVGA")).unwrap().count();
+        assert_eq!(n, 1, "只差大小写的写入必须落到同一个文件");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

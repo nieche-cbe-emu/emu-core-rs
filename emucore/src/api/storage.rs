@@ -20,10 +20,8 @@ fn safe(name: &str) -> String {
 fn home() -> PathBuf {
     match std::env::var("NIECHE_HOME").or_else(|_| std::env::var("NICAI_HOME")) {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
-        _ => {
-            let h = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            PathBuf::from(h).join(".nieche-emu")
-        }
+
+        _ => crate::runtime::user_home().join(".nieche-emu"),
     }
 }
 
