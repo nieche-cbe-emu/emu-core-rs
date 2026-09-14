@@ -22,6 +22,8 @@ pub struct Gfx {
     pub masks: HashMap<u32, Vec<u8>>,
 
     pub by_stream: HashMap<u32, u32>,
+
+    pub wide: bool,
 }
 
 impl Default for Gfx {
@@ -35,6 +37,7 @@ impl Default for Gfx {
             frames: 0,
             masks: HashMap::new(),
             by_stream: HashMap::new(),
+            wide: false,
         }
     }
 }
@@ -50,12 +53,9 @@ pub fn init_fb(uc: &mut Emu, w: u32, h: u32) {
     let img = uc
         .get_data_mut()
         .heap
-        .alloc(12, "VmImageType(screen)", true)
+        .alloc(16, "VmImageType(screen)", true)
         .expect("VmImageType 分配失败");
     uc.w32(img, buf);
-    uc.w16(img + 4, w as u16);
-    uc.w16(img + 6, h as u16);
-    uc.w32(img + 8, 0);
     let g = &mut uc.get_data_mut().rt.gfx;
     g.buf = buf;
     g.img = img;
@@ -63,6 +63,52 @@ pub fn init_fb(uc: &mut Emu, w: u32, h: u32) {
     g.h = h;
     g.bytes = bytes;
     g.frames = 0;
+    write_fb_header(uc);
+}
+
+pub fn header_size(uc: &Emu) -> u32 {
+    if uc.get_data().rt.gfx.wide {
+        16
+    } else {
+        12
+    }
+}
+
+pub fn img_wh(uc: &Emu, addr: u32) -> (u32, u32) {
+    if uc.get_data().rt.gfx.wide {
+        (uc.r32(addr + 4), uc.r32(addr + 8))
+    } else {
+        (uc.r16(addr + 4) as u32, uc.r16(addr + 6) as u32)
+    }
+}
+
+pub fn set_img_wh(uc: &mut Emu, addr: u32, w: u32, h: u32, kind: u8) {
+    if uc.get_data().rt.gfx.wide {
+        uc.w32(addr + 4, w);
+        uc.w32(addr + 8, h);
+        uc.write(addr + 12, &[kind, 0, 0, 0]);
+    } else {
+        uc.w16(addr + 4, w as u16);
+        uc.w16(addr + 6, h as u16);
+        uc.write(addr + 8, &[kind, 0, 0, 0]);
+    }
+}
+
+pub fn write_fb_header(uc: &mut Emu) {
+    let (img, w, h, wide) = {
+        let g = &uc.get_data().rt.gfx;
+        (g.img, g.w, g.h, g.wide)
+    };
+    if wide {
+        uc.w32(img + 4, w);
+        uc.w32(img + 8, h);
+        uc.w32(img + 12, 0);
+    } else {
+        uc.w16(img + 4, w as u16);
+        uc.w16(img + 6, h as u16);
+        uc.w32(img + 8, 0);
+        uc.w32(img + 12, 0);
+    }
 }
 
 pub const ADOPT_BEFORE_FRAME: u64 = 4;
@@ -84,14 +130,11 @@ pub fn maybe_adopt(uc: &mut Emu, w: u32, h: u32) {
     let buf = uc.get_data().rt.gfx.buf;
     let bytes = w * h * 2;
     crate::api::fill(uc, buf, 0, bytes);
-    let img = uc.get_data().rt.gfx.img;
-    uc.w16(img + 4, w as u16);
-    uc.w16(img + 6, h as u16);
-    uc.w32(img + 8, 0);
     let g = &mut uc.get_data_mut().rt.gfx;
     g.w = w;
     g.h = h;
     g.bytes = bytes;
+    write_fb_header(uc);
 }
 
 pub fn raw565(uc: &Emu) -> Vec<u8> {
@@ -144,8 +187,7 @@ fn info(uc: &Emu, addr: u32) -> Option<Info> {
         return None;
     }
     let data = uc.r32(addr);
-    let w = uc.r16(addr + 4) as u32;
-    let h = uc.r16(addr + 6) as u32;
+    let (w, h) = img_wh(uc, addr);
     Some(Info {
         data,
         w,
@@ -182,18 +224,17 @@ pub fn upload(uc: &mut Emu, im: &cbelib::Image, out_addr: u32) -> u32 {
     let vt = if out_addr != 0 {
         out_addr
     } else {
+        let n = header_size(uc);
         uc.get_data_mut()
             .heap
-            .alloc(12, "VmImageType", false)
+            .alloc(n, "VmImageType", false)
             .unwrap_or(0)
     };
     if vt == 0 {
         return 0;
     }
     uc.w32(vt, data);
-    uc.w16(vt + 4, w as u16);
-    uc.w16(vt + 6, h as u16);
-    uc.w32(vt + 8, 0);
+    set_img_wh(uc, vt, w, h, 0);
 
     let src_mask: Option<Vec<u8>> = match (im.transparent, &im.index, &im.alpha) {
         (Some(t), Some(idx), _) => Some(idx.iter().map(|&v| u8::from(v == t)).collect()),

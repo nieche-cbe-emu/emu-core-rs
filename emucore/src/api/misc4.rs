@@ -24,13 +24,13 @@ pub fn cd_rect(uc: &mut Emu) {
 pub fn cd_rect_point2(uc: &mut Emu) {
     let (x, y, w, h) = (s32(uc.arg(0)), s32(uc.arg(1)), s32(uc.arg(2)), s32(uc.arg(3)));
     let (px, py) = (s32(uc.arg(4)), s32(uc.arg(5)));
-    uc.ret(u32::from(x <= px && px <= x + w && y <= py && py <= y + h));
+    uc.ret(u32::from(x <= px && px <= x + w - 1 && y <= py && py <= y + h - 1));
 }
 
 pub fn cd_rect2(uc: &mut Emu) {
     let (ax, ay, aw, ah) = (s32(uc.arg(0)), s32(uc.arg(1)), s32(uc.arg(2)), s32(uc.arg(3)));
     let (bx, by, bw, bh) = (s32(uc.arg(4)), s32(uc.arg(5)), s32(uc.arg(6)), s32(uc.arg(7)));
-    let hit = ax <= bx + bw && bx <= ax + aw && ay <= by + bh && by <= ay + ah;
+    let hit = ax + aw - 1 >= bx && bx + bw - 1 >= ax && ay + ah - 1 >= by && by + bh - 1 >= ay;
     uc.ret(u32::from(hit));
 }
 

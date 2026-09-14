@@ -28,8 +28,9 @@ pub fn get_tick(uc: &mut Emu) {
 pub fn current_time(uc: &mut Emu) {
     let p = uc.arg(0);
     if p != 0 {
-        crate::api::fill(uc, p, 0, 24);
-        uc.w32(p, 2013);
+        for (i, v) in [2013u32, 1, 1, 0, 0, 0].into_iter().enumerate() {
+            uc.w32(p + 4 * i as u32, v);
+        }
     }
     uc.ret(0);
 }
@@ -42,12 +43,12 @@ pub fn invalidate(uc: &mut Emu) {
 
 pub fn image_width(uc: &mut Emu) {
     let p = uc.arg(0);
-    uc.ret(if p != 0 { uc.r16(p + 4) as u32 } else { 0 });
+    uc.ret(if p != 0 { crate::gfx::img_wh(uc, p).0 & 0xFFFF } else { 0 });
 }
 
 pub fn image_height(uc: &mut Emu) {
     let p = uc.arg(0);
-    uc.ret(if p != 0 { uc.r16(p + 6) as u32 } else { 0 });
+    uc.ret(if p != 0 { crate::gfx::img_wh(uc, p).1 & 0xFFFF } else { 0 });
 }
 
 pub fn draw_rect_ex(uc: &mut Emu) {
@@ -116,8 +117,8 @@ pub fn fill_rect_with_image(uc: &mut Emu) {
         uc.ret(0);
         return;
     }
-    let iw = uc.r16(img + 4) as i32;
-    let ih = uc.r16(img + 6) as i32;
+    let (iw, ih) = crate::gfx::img_wh(uc, img);
+    let (iw, ih) = (iw as i32, ih as i32);
     if iw <= 0 || ih <= 0 {
         uc.ret(0);
         return;

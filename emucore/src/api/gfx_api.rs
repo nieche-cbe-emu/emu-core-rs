@@ -131,8 +131,8 @@ fn clip_blit(uc: &mut Emu, img: u32, x: i32, y: i32, cx: i32, cy: i32, cw: i32, 
     if img == 0 || uc.r32(img) == 0 {
         return;
     }
-    let iw = uc.r16(img + 4) as i32;
-    let ih = uc.r16(img + 6) as i32;
+    let (iw, ih) = gfx::img_wh(uc, img);
+    let (iw, ih) = (iw as i32, ih as i32);
     let (x0, y0) = (x.max(cx), y.max(cy));
     let (x1, y1) = ((x + iw).min(cx + cw), (y + ih).min(cy + ch));
     if x1 <= x0 || y1 <= y0 {
@@ -187,6 +187,18 @@ pub fn draw_img_clip_alpha(uc: &mut Emu) {
 
 pub fn img_from_res(uc: &mut Emu) {
     let p = uc.arg(0);
+    if p < 0x10000 {
+
+        let q = crate::api::dfpkg::res_ptr(uc, p as usize);
+        uc.setreg(0, q);
+        uc.setreg(1, 0);
+        if q != 0 {
+            img_from_stream(uc);
+        } else {
+            uc.ret(0);
+        }
+        return;
+    }
     let raw = uc.read_upto(p, 64);
     if let Some(nul) = raw.iter().position(|&c| c == 0) {
         if nul > 0 && nul <= 48 {
@@ -200,5 +212,7 @@ pub fn img_from_res(uc: &mut Emu) {
             }
         }
     }
+
+    uc.setreg(1, 0);
     img_from_stream(uc);
 }

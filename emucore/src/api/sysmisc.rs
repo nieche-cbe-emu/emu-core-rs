@@ -12,6 +12,11 @@ pub fn billing_paynum(uc: &mut Emu) {
     uc.ret(0);
 }
 
+pub fn billing_remain_day(uc: &mut Emu) {
+    let r = if uc.arg(1) == 3 { 1 } else { 0 };
+    uc.ret(r);
+}
+
 pub fn billing_send_sms(uc: &mut Emu) {
     if uc.arg(0) != 14 {
         uc.ret(0);
@@ -20,6 +25,101 @@ pub fn billing_send_sms(uc: &mut Emu) {
     let cb = uc.arg(6);
     runtime::defer(uc, cb, vec![0], "smsResult");
     uc.ret(1);
+}
+
+pub fn billing_pay(uc: &mut Emu) {
+    let cb = uc.arg(2);
+    runtime::defer(uc, cb, vec![1], "payResult");
+    uc.ret(0);
+}
+
+pub fn billing_pay_cbb(uc: &mut Emu) {
+    let cb = uc.arg(3);
+    runtime::defer(uc, cb, vec![1], "payResult");
+    uc.ret(0);
+}
+
+pub fn billing_pay_pwd(uc: &mut Emu) {
+    let cb = uc.arg(0);
+    runtime::defer(uc, cb, vec![1], "payResult");
+    uc.ret(0);
+}
+
+fn bill_reg(uc: &Emu) -> Option<(u8, u8)> {
+    let id = uc.arg(0) as u16;
+    uc.get_data().rt.billing_reg.get(&id).copied()
+}
+
+pub fn billing_is_registered(uc: &mut Emu) {
+    let r = matches!(bill_reg(uc), Some((_, u)) if u != 0);
+    uc.ret(u32::from(r));
+}
+
+pub fn billing_register_info(uc: &mut Emu) {
+    let id = uc.arg(0) as u16;
+    uc.get_data_mut().rt.billing_reg.insert(id, (0, 1));
+    uc.ret(1);
+}
+
+pub fn billing_set_status(uc: &mut Emu) {
+    let (id, v) = (uc.arg(0) as u16, uc.arg(1) as u8);
+    let r = match uc.get_data_mut().rt.billing_reg.get_mut(&id) {
+        Some(e) => {
+            e.0 = v;
+            1
+        }
+        None => 0,
+    };
+    uc.ret(r);
+}
+
+pub fn billing_get_status(uc: &mut Emu) {
+    let r = bill_reg(uc).map_or(1, |e| u32::from(e.0));
+    uc.ret(r);
+}
+
+pub fn billing_get_used(uc: &mut Emu) {
+    let r = bill_reg(uc).map_or(0, |e| u32::from(e.1));
+    uc.ret(r);
+}
+
+pub fn billing_set_used(uc: &mut Emu) {
+    let (id, v) = (uc.arg(0) as u16, uc.arg(1) as u8);
+    if let Some(e) = uc.get_data_mut().rt.billing_reg.get_mut(&id) {
+        e.1 = v;
+    }
+    uc.ret(0);
+}
+
+pub fn billing_clean_month(uc: &mut Emu) {
+    let id = uc.arg(0) as u16;
+    uc.get_data_mut().rt.billing_reg.remove(&id);
+    uc.ret(1);
+}
+
+pub fn billing_pay_times(uc: &mut Emu) {
+    uc.ret(2);
+}
+
+pub fn billing_valid_day(uc: &mut Emu) {
+    uc.ret(30);
+}
+
+pub fn billing_file_name(uc: &mut Emu) {
+    let p = uc.arg(1);
+    if p != 0 {
+        uc.w32(p, 0);
+    }
+    uc.ret(0);
+}
+
+pub fn billing_cancel_sms(uc: &mut Emu) {
+    uc.get_data_mut().rt.pending.retain(|p| p.2 != "smsResult");
+    uc.ret(1);
+}
+
+pub fn screen_type(uc: &mut Emu) {
+    uc.ret(5);
 }
 
 pub fn main_screen_image(uc: &mut Emu) {

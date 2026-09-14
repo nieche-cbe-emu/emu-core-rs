@@ -26,7 +26,7 @@ fn gbk_cells(b: &[u8]) -> u32 {
     cells
 }
 
-fn text_width(uc: &mut Emu, s: &[u8]) -> u32 {
+pub fn text_width(uc: &mut Emu, s: &[u8]) -> u32 {
     match uc.get_data_mut().rt.font_data.as_mut() {
         Some(f) => f.measure(s),
         None => gbk_cells(s) * 8,
@@ -54,8 +54,7 @@ fn target(uc: &Emu, img: u32) -> (u32, u32, u32, u32) {
     if img != 0 {
         let data = uc.r32(img);
         if data != 0 {
-            let w = uc.r16(img + 4) as u32;
-            let h = uc.r16(img + 6) as u32;
+            let (w, h) = gfx::img_wh(uc, img);
             return (data, gfx::stride_of(w), w, h);
         }
     }

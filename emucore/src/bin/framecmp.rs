@@ -75,7 +75,19 @@ fn main() -> ExitCode {
     for i in 0..frames {
         uc.get_data_mut().call_log.clear();
 
-        if i % 37 == 0 {
+        if let Ok(ks) = std::env::var("KEYSCRIPT") {
+            for it in ks.split(',') {
+                if let Some((f, m)) = it.split_once(':') {
+                    if f.parse::<usize>().ok() == Some(i) {
+                        let m = u32::from_str_radix(m.trim_start_matches("0x"), 16).unwrap_or(0);
+                        runtime::release_all(&mut uc);
+                        if m != 0 {
+                            runtime::press(&mut uc, m);
+                        }
+                    }
+                }
+            }
+        } else if i % 37 == 0 {
             runtime::press(&mut uc, 1 << ((i / 37) % 12));
         } else if i % 37 == 4 {
             runtime::release_all(&mut uc);

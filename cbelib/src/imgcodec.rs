@@ -249,11 +249,14 @@ fn paeth(a: i32, b: i32, c: i32) -> i32 {
 }
 
 pub fn decode_png(data: &[u8]) -> R<Image> {
-    if data.len() < 8 || &data[..8] != b"\x89PNG\r\n\x1a\n" {
+
+    let game = data.len() >= 8 && &data[..8] == b"\x89PNGGAME";
+    if data.len() < 8 || (&data[..8] != b"\x89PNG\r\n\x1a\n" && !game) {
         return Err(ierr!("不是 PNG"));
     }
     let mut o = 8usize;
     let mut idat: Vec<u8> = Vec::new();
+    let mut game_pal: Vec<u8> = Vec::new();
     let mut plte: &[u8] = &[];
     let mut trns: &[u8] = &[];
     let (mut w, mut h, mut depth, mut ctype) = (0usize, 0usize, 0u8, 0u8);
@@ -261,6 +264,17 @@ pub fn decode_png(data: &[u8]) -> R<Image> {
     while o + 8 <= data.len() {
         let ln = u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
         let tag = &data[o + 4..o + 8];
+        if game && tag == b"PLTE" {
+            let n = ln / 3;
+            game_pal.clear();
+            for i in 0..n {
+                let at = o + 8 + 2 * i;
+                let v = u16::from_le_bytes([*data.get(at).unwrap_or(&0), *data.get(at + 1).unwrap_or(&0)]);
+                game_pal.extend_from_slice(&[((v >> 11) << 3) as u8, (((v >> 5) & 0x3F) << 2) as u8, ((v & 0x1F) << 3) as u8]);
+            }
+            o += 12 + 2 * n;
+            continue;
+        }
         let body = data
             .get(o + 8..(o + 8 + ln).min(data.len()))
             .unwrap_or(&[]);
@@ -288,6 +302,9 @@ pub fn decode_png(data: &[u8]) -> R<Image> {
     }
     if !have_ihdr {
         return Err(ierr!("PNG 缺少 IHDR"));
+    }
+    if game && !game_pal.is_empty() {
+        plte = &game_pal;
     }
     let raw = miniz_oxide::inflate::decompress_to_vec_zlib(&idat)
         .map_err(|e| ierr!("IDAT 解压失败: {e:?}"))?;

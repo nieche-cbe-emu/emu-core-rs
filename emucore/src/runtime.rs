@@ -30,11 +30,20 @@ pub enum Style {
 
 pub struct Rt {
     pub style: Style,
+
+    pub gamelib_v3: bool,
     pub host: u32,
     pub sys_tbl: u32,
     pub game_tbl: u32,
 
     pub managers: HashMap<u32, u32>,
+    pub tag_managers: HashMap<&'static str, u32>,
+
+    pub aps_dev: u32,
+
+    pub billing_reg: HashMap<u16, (u8, u8)>,
+
+    pub host_bufs: HashMap<&'static str, u32>,
 
     pub init_map: HashMap<u32, u32>,
     pub mod_cb0: u32,
@@ -78,6 +87,15 @@ pub struct Rt {
     pub frames: u64,
 
     pub installed: HashMap<(u32, &'static str), u32>,
+
+    pub methods: HashMap<&'static str, u32>,
+
+    pub co_frames: Vec<(CoK, u32, u32)>,
+    pub co_trap: u32,
+
+    pub oldlib_clip: [i32; 4],
+
+    pub piclib_tmpimg: u32,
 
     pub datapackage: u32,
 
@@ -131,6 +149,11 @@ impl Rt {
             sys_tbl: 0,
             game_tbl: 0,
             managers: HashMap::new(),
+            tag_managers: HashMap::new(),
+            aps_dev: 0,
+            billing_reg: HashMap::new(),
+            gamelib_v3: false,
+            host_bufs: HashMap::new(),
             init_map: HashMap::new(),
             mod_cb0: 0,
             mod_cb1: 0,
@@ -159,6 +182,11 @@ impl Rt {
             frame_ms: 40,
             frames: 0,
             installed: HashMap::new(),
+            methods: HashMap::new(),
+            co_frames: Vec::new(),
+            co_trap: 0,
+            oldlib_clip: [0; 4],
+            piclib_tmpimg: 0,
             datapackage: 0,
             dfblock: 0,
             module_name: String::new(),
@@ -359,6 +387,21 @@ pub fn get_manager(uc: &mut Emu, sysoff: u32) -> u32 {
     }
     let ent = vmspec::SYS.iter().find(|(o, _, _)| *o == sysoff);
     let tag: Option<&'static str> = ent.and_then(|(_, _, t)| *t);
+    let addr = build_manager(uc, tag);
+    uc.get_data_mut().rt.managers.insert(sysoff, addr);
+    addr
+}
+
+pub fn manager_by_tag(uc: &mut Emu, tag: &'static str) -> u32 {
+    if let Some(&a) = uc.get_data().rt.tag_managers.get(tag) {
+        return a;
+    }
+    let addr = build_manager(uc, Some(tag));
+    uc.get_data_mut().rt.tag_managers.insert(tag, addr);
+    addr
+}
+
+fn build_manager(uc: &mut Emu, tag: Option<&'static str>) -> u32 {
     let size = match tag.and_then(vmspec::mgr) {
         Some(m) if m.size != 0 => m.size + 0x100,
         _ => 0x400 + 0x100,
@@ -369,7 +412,6 @@ pub fn get_manager(uc: &mut Emu, sysoff: u32) -> u32 {
         .data
         .alloc(size, name, true)
         .expect("宿主结构区耗尽");
-    uc.get_data_mut().rt.managers.insert(sysoff, addr);
 
     let mut off = 0u32;
     while off < size {
@@ -578,6 +620,56 @@ fn h_old_syscall(uc: &mut Emu) {
         old_fetch(uc);
         return;
     }
+    if sid == OLD_GAMELIB {
+        let t = old_gamelib(uc);
+        uc.ret(t);
+        return;
+    }
+    if sid == OLD_GAMELIB_COPY {
+        let buf = uc.arg(1);
+        if buf != 0 {
+            let t = old_gamelib(uc);
+            if let Ok(v) = uc.mem_read_as_vec(t as u64, OLD_GAMELIB_COPY_SIZE as usize) {
+                uc.write(buf, &v);
+            }
+        }
+        uc.ret(0);
+        return;
+    }
+    if sid == 185 {
+
+        let frame = uc.arg(1);
+        if frame != 0 {
+            let (pp, n) = (uc.r32(frame), uc.r32(frame + 4));
+            uc.setreg(0, n);
+            crate::api::mem::gblock_malloc(uc);
+            let p = uc.reg(0);
+            if pp != 0 {
+                uc.w32(pp, p);
+            }
+            uc.write(frame + 8, &[u8::from(p != 0)]);
+        }
+        uc.ret(0);
+        return;
+    }
+    if sid == 190 {
+
+        let frame = uc.arg(1);
+        let pp = if frame != 0 { uc.r32(frame) } else { 0 };
+        if pp != 0 {
+            uc.w32(pp, 0);
+        }
+        uc.ret(0);
+        return;
+    }
+    if OLD_NET.contains(&sid) {
+        old_net(uc, sid);
+        return;
+    }
+    if let Some(&(_, tag, name, spec)) = OLD_FORWARD.iter().find(|e| e.0 == sid) {
+        old_forward(uc, tag, name, spec);
+        return;
+    }
 
     let obj = old_obj(uc, sid as i64);
     let frame = uc.arg(1);
@@ -585,6 +677,148 @@ fn h_old_syscall(uc: &mut Emu) {
         uc.w32(frame + 8, obj);
     }
     uc.ret(obj);
+}
+
+const OLD_FORWARD: &[(u32, &str, &str, &str)] = &[
+    (183, "VmMemoryManagerTag", "dF_InitMemory", "I"),
+    (142, "VmMemoryManagerTag", "mF_GetGMemoryBlockPtr", ""),
+    (103, "VmMemoryManagerTag", "mF_InitMemoryBlock", "II"),
+    (184, "VmMemoryManagerTag", "dF_ReleaseMemory", ""),
+    (4, "VmSysManagerTag", "VmEnterWinClose", ""),
+    (61, "GameManagerOldTag", "Storage_Date", "IIIBB"),
+    (156, "VmDFEnginelManagerTag", "DF_SendMessage", "IHI"),
+    (1050, "VmIoManagerTag", "Vm_file_open", "III"),
+    (1051, "VmIoManagerTag", "Vm_file_write", "III"),
+    (1052, "VmIoManagerTag", "Vm_file_close", "I"),
+    (1063, "VmIoManagerTag", "Vm_file_read", "III"),
+    (1066, "VmIoManagerTag", "Vm_file_getfilesize", "I"),
+];
+
+fn old_unpack(uc: &Emu, frame: u32, spec: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut off = 0u32;
+    for c in spec.chars() {
+        let w = match c {
+            'I' => 4,
+            'H' => 2,
+            _ => 1,
+        };
+        off = off.div_ceil(w) * w;
+        let v = if frame == 0 {
+            0
+        } else {
+            match c {
+                'I' => uc.r32(frame + off),
+                'H' => uc.r16(frame + off) as i16 as i32 as u32,
+                _ => uc.r8(frame + off) as u32,
+            }
+        };
+        out.push(v);
+        off += w;
+    }
+    out
+}
+
+fn old_forward(uc: &mut Emu, tag: &str, name: &str, spec: &str) {
+    let frame = uc.arg(1);
+    let args = old_unpack(uc, frame, spec);
+    for (i, v) in args.iter().take(4).enumerate() {
+        uc.setreg(i as u32, *v);
+    }
+    let sp = uc.reg_read(unicorn_engine::RegisterARM::SP).unwrap_or(0) as u32;
+    let extra: Vec<u32> = args.iter().skip(4).copied().collect();
+    let saved = if extra.is_empty() {
+        Vec::new()
+    } else {
+        uc.mem_read_as_vec(sp as u64, 4 * extra.len()).unwrap_or_default()
+    };
+    for (i, v) in extra.iter().enumerate() {
+        uc.w32(sp + 4 * i as u32, *v);
+    }
+    match crate::api::lookup(tag, name) {
+        Some(f) => f(uc),
+        None => uc.ret(0),
+    }
+    if !extra.is_empty() {
+        uc.write(sp, &saved);
+    }
+}
+
+const OLD_NET: &[u32] = &[1004, 1005, 1006, 1030, 1031, 1057];
+
+fn old_net(uc: &mut Emu, sid: u32) {
+    let frame = uc.arg(1);
+    match sid {
+        1004 if frame != 0 => {
+            let (url, cb) = (uc.r32(frame), uc.r32(frame + 12));
+            uc.setreg(0, url);
+            uc.setreg(1, cb);
+            uc.setreg(2, 0);
+            crate::api::misc3::get_http(uc);
+            uc.ret(1);
+        }
+        1030 | 1006 | 1031 => uc.ret(1),
+        _ => uc.ret(0),
+    }
+}
+
+pub const OLD_GAMELIB: u32 = 143;
+pub const OLD_GAMELIB_COPY: u32 = 82;
+pub const OLD_GAMELIB_COPY_SIZE: u32 = 0x26c;
+pub const OLD_GAMELIB_GAP: (u32, u32) = (0x114, 8);
+
+pub const OLD_SMS_DIFF: u32 = 3764;
+pub const OLD_SMS_ADD: u32 = 1376;
+
+fn old_gamelib(uc: &mut Emu) -> u32 {
+    const KEY: i64 = -3;
+    if let Some(&a) = uc.get_data().rt.old_objs.get(&KEY) {
+        return a;
+    }
+
+    uc.get_data_mut().rt.gamelib_v3 = true;
+    uc.get_data_mut().rt.gfx.wide = true;
+    crate::gfx::write_fb_header(uc);
+    let base = get_manager(uc, 0x084);
+    let size = match vmspec::mgr("GameManagerOldTag") {
+        Some(m) if m.size != 0 => m.size + 0x100,
+        _ => 0x400 + 0x100,
+    };
+    let addr = uc
+        .get_data_mut()
+        .data
+        .alloc(size, "GameManagerOld@v3", true)
+        .expect("宿主结构区耗尽");
+    let (at, gap) = OLD_GAMELIB_GAP;
+    let mut off = 0u32;
+    while off + gap < size {
+        let src = if off < at { off } else { off + gap };
+        let v = uc.r32(base + src);
+        uc.w32(addr + off, v);
+        off += 4;
+    }
+    let pay = machine::new_trap(uc, "BILLING_GetPayNumByAppId@v3", Some(crate::api::sysmisc::billing_paynum));
+    reserve_traps(uc, OLD_SMS_DIFF / 4 - 1);
+    let remain = machine::new_trap(uc, "BILLING_GetRemainDay@v3", Some(crate::api::sysmisc::billing_remain_day));
+    reserve_traps(uc, OLD_SMS_ADD / 4 - 1);
+    machine::new_trap(uc, "vMSendSms@v3", Some(h_old_send_sms));
+    uc.w32(addr + 0x240, pay);
+    uc.w32(addr + 0x244, remain);
+    uc.get_data_mut().rt.old_objs.insert(KEY, addr);
+    addr
+}
+
+fn reserve_traps(uc: &mut Emu, n: u32) {
+    for _ in 0..n {
+        machine::new_trap(uc, "", None);
+    }
+}
+
+fn h_old_send_sms(uc: &mut Emu) {
+    let sp = uc.reg_read(unicorn_engine::RegisterARM::SP).unwrap_or(0) as u32;
+    let cb = uc.r32(sp + 4);
+    defer(uc, cb, vec![1], "smsResult");
+    uc.ret(1);
 }
 
 fn old_fetch(uc: &mut Emu) {
@@ -596,9 +830,13 @@ fn old_fetch(uc: &mut Emu) {
     let ptr = uc.r32(desc);
     let handle = uc.r32(desc + 4);
     let ln = uc.r32(desc + 8);
-    if ptr != 0 && ln >= 4 {
 
+    if ptr != 0 && ln >= 4 {
         uc.w32(ptr, handle);
+    } else if ptr != 0 && ln == 2 {
+        uc.w16(ptr, handle as u16);
+    } else if ptr != 0 && ln == 1 {
+        uc.write(ptr, &[handle as u8]);
     }
     uc.ret(1);
 }
@@ -874,6 +1112,80 @@ pub fn install(uc: &mut Emu, addr: u32, name: &'static str, f: machine::ApiFn) {
         }
     };
     uc.w32(addr, t);
+}
+
+pub fn method(uc: &mut Emu, name: &'static str, f: machine::ApiFn) -> u32 {
+    if let Some(&t) = uc.get_data().rt.methods.get(name) {
+        return t;
+    }
+    let t = machine::new_trap(uc, name, Some(f));
+    uc.get_data_mut().rt.methods.insert(name, t);
+    t
+}
+
+pub type CoK = Box<dyn FnOnce(&mut Emu, u32) -> Co>;
+
+pub enum Co {
+    Call(u32, Vec<u32>, CoK),
+    Done(u32),
+}
+
+pub fn cocall(uc: &mut Emu, co: Co) {
+    let lr = uc.lr();
+    let sp = uc.reg_read(unicorn_engine::RegisterARM::SP).unwrap_or(0) as u32;
+    co_step(uc, co, lr, sp, true);
+}
+
+fn co_step(uc: &mut Emu, co: Co, lr: u32, sp: u32, first: bool) {
+    use unicorn_engine::RegisterARM;
+    match co {
+        Co::Done(v) => {
+            uc.ret(v);
+            if !first {
+                let _ = uc.reg_write(RegisterARM::SP, sp as u64);
+                let _ = uc.reg_write(RegisterARM::LR, lr as u64);
+                uc.get_data_mut().resume_pc = Some(lr);
+                let _ = uc.emu_stop();
+            }
+        }
+        Co::Call(f, args, k) => {
+            if uc.get_data().rt.co_trap == 0 {
+                let t = machine::new_trap(uc, "<hostco-return>", Some(co_return));
+                uc.get_data_mut().rt.co_trap = t;
+            }
+            let extra: Vec<u32> = args.iter().skip(4).copied().collect();
+            let nsp = if extra.is_empty() {
+                sp
+            } else {
+                (sp - 4 * extra.len() as u32) & !7
+            };
+            for (i, a) in extra.iter().enumerate() {
+                uc.w32(nsp + 4 * i as u32, *a);
+            }
+            for (i, a) in args.iter().take(4).enumerate() {
+                uc.setreg(i as u32, *a);
+            }
+            let _ = uc.reg_write(RegisterARM::SP, nsp as u64);
+            uc.get_data_mut().rt.co_frames.push((k, lr, sp));
+            let t = uc.get_data().rt.co_trap;
+            let _ = uc.reg_write(RegisterARM::LR, t as u64);
+            uc.get_data_mut().resume_pc = Some(f);
+            let _ = uc.emu_stop();
+        }
+    }
+}
+
+fn co_return(uc: &mut Emu) {
+
+    if uc.get_data().resume_pc.is_some() || uc.get_data().rt.co_frames.is_empty() {
+        return;
+    }
+    let Some((k, lr, sp)) = uc.get_data_mut().rt.co_frames.pop() else {
+        return;
+    };
+    let r0 = uc.reg(0);
+    let co = k(uc, r0);
+    co_step(uc, co, lr, sp, false);
 }
 
 pub fn user_home() -> std::path::PathBuf {

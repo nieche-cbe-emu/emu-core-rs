@@ -33,6 +33,16 @@ const METHODS: &[(u32, &str, crate::machine::ApiFn)] = &[
     (0x50, "DF_DataPackage_InitTxt", dp_noop),
 ];
 
+pub const DP_SIZE_OLD: u32 = 0x4c;
+
+fn dp_size(uc: &Emu) -> u32 {
+    if uc.get_data().rt.gamelib_v3 {
+        DP_SIZE_OLD
+    } else {
+        0x6c
+    }
+}
+
 pub fn init_df_datapackage(uc: &mut Emu) {
     let pkg = uc.arg(0);
     let nsub = (uc.arg(1) & 0xFFFF) as u32;
@@ -40,13 +50,18 @@ pub fn init_df_datapackage(uc: &mut Emu) {
         uc.ret(0);
         return;
     }
+    let size = dp_size(uc);
     for o in [0x04u32, 0x0c, 0x10, 0x18, 0x1c, 0x64] {
-        uc.w32(pkg + o, 0);
+        if o < size {
+            uc.w32(pkg + o, 0);
+        }
     }
     uc.w32(pkg + off::FILE_NUM, 0);
     uc.write(pkg + off::IS_LOADED, &[1]);
-    uc.write(pkg + off::IS_MOMENT_READ, &[0]);
-    uc.w32(pkg + off::FILE, 0xFFFF_FFFF);
+    if off::FILE < size {
+        uc.write(pkg + off::IS_MOMENT_READ, &[0]);
+        uc.w32(pkg + off::FILE, 0xFFFF_FFFF);
+    }
     let n = nsub.max(1) * 4;
     let subs = uc
         .get_data_mut()
@@ -67,7 +82,9 @@ pub fn init_df_datapackage(uc: &mut Emu) {
 
     uc.write(pkg + off::SUB_PACKAGE_NUM, &(nsub as u16).to_le_bytes());
     for &(o, name, f) in METHODS {
-        runtime::install(uc, pkg + o, name, f);
+        if o < size {
+            runtime::install(uc, pkg + o, name, f);
+        }
     }
     uc.ret(pkg);
 }
@@ -180,7 +197,9 @@ fn materialize(uc: &mut Emu, pkg: u32, key: &str, ents: &[(String, Vec<u8>)]) ->
     uc.w32(pkg + off::FILE_NAME_TABLE, names_tbl);
     uc.w32(pkg + off::FILE_OFFSET_TABLE, offs_tbl);
     uc.w32(pkg + off::FILE_DATA, data_p);
-    uc.w32(pkg + off::DATA_SIZE, total);
+    if off::DATA_SIZE < dp_size(uc) {
+        uc.w32(pkg + off::DATA_SIZE, total);
+    }
     uc.write(pkg + off::IS_LOADED, &[1]);
     n
 }
@@ -399,11 +418,11 @@ pub fn dp_get_file(uc: &mut Emu) {
     uc.ret(data + o);
 }
 
-fn res_index(uc: &Emu, name: &str) -> Option<usize> {
+pub fn res_index(uc: &Emu, name: &str) -> Option<usize> {
     entries_opt(uc, None).iter().position(|(n, _)| n == name)
 }
 
-fn res_ptr(uc: &Emu, i: usize) -> u32 {
+pub fn res_ptr(uc: &Emu, i: usize) -> u32 {
     let pkg = uc.get_data().rt.datapackage;
     if pkg == 0 {
         return 0;

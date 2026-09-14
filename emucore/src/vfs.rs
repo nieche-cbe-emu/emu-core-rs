@@ -14,6 +14,7 @@ pub const GLUE_PREFIXES: &[&str] = &[
     "cwstorecfg",
     "wstore_host",
     "coolbar_list",
+    "downinfo3",
 ];
 
 pub struct Vfs {
