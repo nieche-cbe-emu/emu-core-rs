@@ -1,11 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["cbelib", "emucore", "emuffi", "emuwin"]
+members = ["cbelib", "emucore", "emuffi"]
+
+exclude = ["emuwin"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+
+rust-version = "1.85"
 
 [profile.release]
 opt-level = 3

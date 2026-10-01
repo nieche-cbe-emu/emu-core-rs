@@ -563,16 +563,16 @@ pub fn setup(uc: &mut Emu, m: &cbelib::CbeModule) {
             .chars()
             .map(|c| if "/\\:*?\"<>|".contains(c) { '_' } else { c })
             .collect();
-        let root = home.join("fs").join(if safe.trim().is_empty() {
-            "unnamed".to_string()
-        } else {
-            safe.trim().to_string()
-        });
+
+        let dir = if safe.trim().is_empty() { "unnamed" } else { safe.trim() };
+        let root = home.join("fs").join(dir);
 
         let base = std::env::var("NIECHE_FSBASE")
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("assets/fatfs"));
         uc.get_data_mut().rt.vfs = crate::vfs::Vfs::new(root, Some(base));
+
+        uc.get_data_mut().rt.audio.outdir = Some(home.join("audio").join(dir));
     }
     if let Some(f) = crate::font::Font::load() {
         let d = &mut uc.get_data_mut().rt;
@@ -585,8 +585,6 @@ pub fn setup(uc: &mut Emu, m: &cbelib::CbeModule) {
         d.icons = m.icons.clone();
         d.packages = m.packages.clone();
         d.module_name = m.name.clone();
-
-        d.audio.outdir = Some(std::path::PathBuf::from(format!("out/{}/audio", m.name)));
     }
 }
 

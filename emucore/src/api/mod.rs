@@ -381,6 +381,11 @@ pub static ENTRIES: &[Entry] = &[
     e!("VmDlResourceManagerTag", "vmGetDataPackage", misc3::get_data_package),
     e!(AUD_T, "vMAduioGetState", misc3::audio_state),
     e!(AUD_T, "vMAudioStop", misc3::audio_stop),
+
+    e!(AUD_T, "VmMp3StopBystream", misc3::audio_stop),
+    e!(AUD_T, "VmMp3StopByFile", misc3::audio_stop),
+    e!(AUD_T, "VmAMRStopPlay", misc3::audio_stop),
+    e!(AUD_T, "CB_AUD_StopPlayEx", misc3::audio_stop),
     e!(IO_T, "Vm_get_freespace", misc3::free_space),
     e!(IO_T, "Vm_get_freespace_ex", misc3::free_space),
     e!(SYS_T, "VmIsInnerApp", misc::zero),

@@ -261,7 +261,8 @@ pub fn audio_stop(uc: &mut Emu) {
         a.events.push("{\"op\":\"stop\"}".to_string());
     }
     a.state = crate::audio::STOPPED;
-    uc.ret(0);
+
+    uc.ret(1);
 }
 
 pub fn audio_volume(uc: &mut Emu) {

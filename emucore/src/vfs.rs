@@ -45,11 +45,22 @@ impl Vfs {
         let p = p.trim_start_matches('/');
 
         let b = p.as_bytes();
-        if b.len() > 1 && b[1] == b':' {
-            p[2..].trim_start_matches('/').to_string()
+        let p = if b.len() > 1 && b[1] == b':' {
+            p[2..].trim_start_matches('/')
         } else {
-            p.to_string()
+            p
+        };
+        let mut out: Vec<&str> = Vec::new();
+        for comp in p.split('/') {
+            match comp {
+                "" | "." => {}
+                ".." => {
+                    out.pop();
+                }
+                c => out.push(c),
+            }
         }
+        out.join("/")
     }
 
     pub fn host_path(&self, path: &str) -> PathBuf {
@@ -235,6 +246,40 @@ fn mkparent(p: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn norm_clamps_parent_dir() {
+        for (raw, want) in [
+            ("a/b.dat", "a/b.dat"),
+            ("..\\..\\escape.txt", "escape.txt"),
+            ("C:\\x\\y", "x/y"),
+            ("/abs/p", "abs/p"),
+            ("a/./b", "a/b"),
+            ("a/../b", "b"),
+            ("a/b/../../../../c", "c"),
+            ("", ""),
+            ("..", ""),
+            (".system/MB_MSTAR_WQVGA\\AppStore.CBE", ".system/MB_MSTAR_WQVGA/AppStore.CBE"),
+        ] {
+            assert_eq!(Vfs::norm(raw), want, "norm({raw:?})");
+        }
+    }
+
+    #[test]
+    fn write_stays_inside_sandbox() {
+        let tmp = std::env::temp_dir().join(format!("nieche-vfs-esc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let root = tmp.join("fs").join("mod");
+        let mut v = Vfs::new(root.clone(), None);
+
+        let h = v.open("..\\..\\escaped.txt", "w+");
+        assert_ne!(h, OPEN_FAIL);
+        v.write(h, b"x");
+        v.close(h);
+        assert!(root.join("escaped.txt").exists(), "应落在沙盒里");
+        assert!(!tmp.join("escaped.txt").exists(), "不能落到沙盒外面");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn case_insensitive_like_fat() {

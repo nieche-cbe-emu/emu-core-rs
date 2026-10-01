@@ -156,7 +156,8 @@ impl Audio {
         let kind = sniff(data);
         let path = self.dump(data, name);
         self.events.push(format!(
-            "{{\"op\":\"play\",\"path\":{},\"loop\":{},\"kind\":\"{}\",\"name\":{}}}",
+
+            "{{\"op\":\"play\",\"path\":{},\"loop\":{},\"ext\":\"{}\",\"name\":{}}}",
             match &path {
                 Some(p) => crate::session::json_str(p),
                 None => "null".to_string(),

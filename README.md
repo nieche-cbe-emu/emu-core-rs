@@ -17,7 +17,7 @@ macOS、Windows、Android 三个外壳跑的都是这一份代码。
 
 ## 环境要求
 
-- Rust 1.75 及以上（edition 2021）
+- Rust 1.85 及以上（edition 2021）
 - CMake 与 Ninja（`unicorn-engine` 构建依赖）
 
 ```bash
@@ -89,7 +89,7 @@ nieche_close(s);
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `NIECHE_HOME` | `~/.nieche-emu` | 数据根：存档与模块虚拟文件系统 |
+| `NIECHE_HOME` | `~/.nieche-emu` | 数据根：存档、模块虚拟文件系统、落盘的音频 |
 | `NIECHE_LIB` | 自动查找 | `nieche.py` 加载的动态库路径 |
 | `NIECHE_FSBASE` | `assets/fatfs` | 虚拟文件系统的只读底层 |
 
@@ -107,8 +107,13 @@ cargo test --release
 
 逐帧差分工具在 [emu-tools](https://github.com/nieche-cbe-emu/emu-tools)，
 参照实现是 [emu-core-py](https://github.com/nieche-cbe-emu/emu-core-py)。
-29 个模块语料上：60 帧完全一致 29/29，300 帧 28/29。
+29 个模块语料上：60 帧完全一致 29/29，300 帧 29/29。
 
 ## 说明
 
 本仓库只包含代码。游戏数据、手机固件与真机文件系统不在此处，也不提供。
+
+## 许可证
+
+GPL-2.0，见 LICENSE。核心链接 unicorn（GPL-2.0），由它编出来的二进制只能按同样的条款分发。
+第三方组件逐项见 THIRD-PARTY.md。
