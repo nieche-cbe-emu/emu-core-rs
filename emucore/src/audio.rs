@@ -37,6 +37,71 @@ pub fn sniff(d: &[u8]) -> &'static str {
     "bin"
 }
 
+const MP3_BR: [[[u32; 15]; 3]; 2] = [
+    [
+        [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+        [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+        [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+    ],
+    [
+        [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+        [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+        [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    ],
+];
+
+pub fn mp3_duration_ms(d: &[u8]) -> u64 {
+    let n = d.len();
+    let mut o = 0usize;
+    if n >= 10 && d.starts_with(b"ID3") {
+
+        o = 10 + (((d[6] & 0x7F) as usize) << 21
+            | ((d[7] & 0x7F) as usize) << 14
+            | ((d[8] & 0x7F) as usize) << 7
+            | (d[9] & 0x7F) as usize);
+    }
+    let mut i = o;
+    while i + 4 <= n {
+        if d[i] == 0xFF && d[i + 1] & 0xE0 == 0xE0 {
+            let ver = if (d[i + 1] >> 3) & 1 == 1 { 1usize } else { 2usize };
+            let layer = 4usize - ((d[i + 1] >> 1) & 3) as usize;
+            let bri = ((d[i + 2] >> 4) & 0x0F) as usize;
+            let sri = (d[i + 2] >> 2) & 0x03;
+            if (1..=3).contains(&layer) && bri != 0 && bri != 0x0F && sri != 3 {
+                let kbps = MP3_BR[ver - 1][layer - 1][bri] as u64;
+                if kbps > 0 {
+                    return (((n - i) as u64) * 8 / kbps).max(100);
+                }
+            }
+        }
+        i += 1;
+    }
+    ((n as u64) * 8 / 32).max(500)
+}
+
+pub fn wav_duration_ms(d: &[u8]) -> u64 {
+    let n = d.len();
+    if n < 44 || !d.starts_with(b"RIFF") || &d[8..12] != b"WAVE" {
+        return ((n as u64) / 8).max(500);
+    }
+    let (mut o, mut rate, mut data) = (12usize, 0u64, 0u64);
+    while o + 8 <= n {
+        let tag = &d[o..o + 4];
+        let ln = u32::from_le_bytes([d[o + 4], d[o + 5], d[o + 6], d[o + 7]]) as usize;
+        if tag == b"fmt " && ln >= 16 && o + 20 <= n {
+            rate = u32::from_le_bytes([d[o + 16], d[o + 17], d[o + 18], d[o + 19]]) as u64;
+        } else if tag == b"data" {
+            data = ln.min(n - o - 8) as u64;
+            break;
+        }
+        o += 8 + ln + (ln & 1);
+    }
+    if rate > 0 && data > 0 {
+        return (data * 1000 / rate).max(100);
+    }
+    ((n as u64) / 8).max(500)
+}
+
 pub fn midi_duration_ms(d: &[u8]) -> u64 {
     if !d.starts_with(b"MThd") || d.len() < 14 {
         return 1000;
@@ -146,8 +211,8 @@ impl Audio {
         }
         let dur = match sniff(data) {
             "mid" => midi_duration_ms(data),
-
-            "mp3" => (data.len() as u64 * 8 / 32).max(500),
+            "mp3" => mp3_duration_ms(data),
+            "wav" => wav_duration_ms(data),
             _ => (data.len() as u64 / 8).max(500),
         };
         self.looping = looping;
@@ -179,5 +244,69 @@ impl Audio {
                 self.events.push("{\"op\":\"stop\"}".to_string());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mp3(b1: u8, b2: u8, total: usize) -> Vec<u8> {
+        let mut v = vec![0xFF, b1, b2, 0x00];
+        v.resize(total, 0);
+        v
+    }
+
+    fn id3(size: usize, inner: &[u8]) -> Vec<u8> {
+        let n = size;
+        let mut v = vec![b'I', b'D', b'3', 3, 0, 0];
+        v.extend_from_slice(&[
+            ((n >> 21) & 0x7F) as u8,
+            ((n >> 14) & 0x7F) as u8,
+            ((n >> 7) & 0x7F) as u8,
+            (n & 0x7F) as u8,
+        ]);
+        v.resize(10 + n, 0);
+        v.extend_from_slice(inner);
+        v
+    }
+
+    fn wav(byte_rate: u32, data_len: usize) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&((36 + data_len) as u32).to_le_bytes());
+        v.extend_from_slice(b"WAVE");
+        v.extend_from_slice(b"fmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&8000u32.to_le_bytes());
+        v.extend_from_slice(&byte_rate.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&8u16.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&(data_len as u32).to_le_bytes());
+        v.resize(44 + data_len, 0);
+        v
+    }
+
+    #[test]
+    fn mp3_duration_ms_cases() {
+        assert_eq!(mp3_duration_ms(&mp3(0xFB, 0x90, 29227)), 29227 * 8 / 128);
+        assert_eq!(mp3_duration_ms(&mp3(0xF3, 0x10, 35428)), 35428 * 8 / 8);
+        assert_eq!(mp3_duration_ms(&mp3(0xFB, 0x10, 91869)), 91869 * 8 / 32);
+        assert_eq!(mp3_duration_ms(&mp3(0xFB, 0x30, 91869)), 91869 * 8 / 48);
+        assert_eq!(mp3_duration_ms(&id3(1024, &mp3(0xFB, 0x90, 4096))), 4096 * 8 / 128);
+        assert_eq!(mp3_duration_ms(&[0xFF]), 500);
+        assert_eq!(mp3_duration_ms(&[0x11; 8000]), 8000 * 8 / 32);
+    }
+
+    #[test]
+    fn wav_duration_ms_cases() {
+        assert_eq!(wav_duration_ms(&wav(32000, 64000)), 2000);
+        let mut bad = Vec::new();
+        bad.extend_from_slice(b"RIFF\x00\x00\x00\x00WAVE");
+        bad.resize(76, 0);
+        assert_eq!(wav_duration_ms(&bad), 500);
     }
 }
