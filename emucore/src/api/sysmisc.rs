@@ -147,8 +147,7 @@ pub fn screen_h(uc: &mut Emu) {
 
 pub fn screen_change(uc: &mut Emu) {
     let scr = uc.arg(0);
-    uc.get_data_mut().rt.screens.clear();
-    runtime::push_screen(uc, scr, 0, 1);
+    runtime::change_sub_screen(uc, scr);
     uc.ret(0);
 }
 

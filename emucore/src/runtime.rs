@@ -1,5 +1,5 @@
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use crate::machine::{self, Emu, Mach};
 use crate::vmspec;
@@ -46,6 +46,8 @@ pub struct Rt {
     pub host_bufs: HashMap<&'static str, u32>,
 
     pub init_map: HashMap<u32, u32>,
+
+    pub init_dsts: BTreeSet<u32>,
     pub mod_cb0: u32,
     pub mod_cb1: u32,
     pub screen_w: u32,
@@ -69,6 +71,8 @@ pub struct Rt {
     pub pending: Vec<(u32, Vec<u32>, &'static str)>,
 
     pub screens: Vec<(u32, u32, u32)>,
+
+    pub sub_screen: u32,
     pub keys_down: u32,
     pub keys_up: u32,
     pub keys_hold: u32,
@@ -103,6 +107,10 @@ pub struct Rt {
 
     pub module_name: String,
 
+    pub res_off: u32,
+
+    pub dp_full_path: u32,
+
     pub vfs: crate::vfs::Vfs,
 
     pub finds: HashMap<u32, Vec<String>>,
@@ -132,6 +140,14 @@ pub struct Rt {
     pub pkg_entries: Vec<(u32, Vec<(String, u32)>)>,
 
     pub pkg_wanted: Vec<(u32, Vec<String>)>,
+
+    pub dp_sizes: HashMap<u32, u32>,
+
+    pub ro_words: Vec<u32>,
+
+    pub foreign_shadow: HashMap<String, (u32, Vec<u32>, Vec<(String, u32)>)>,
+
+    pub foreign_cur: Option<(u32, String)>,
     pub logs: Vec<String>,
 }
 
@@ -155,6 +171,7 @@ impl Rt {
             gamelib_v3: false,
             host_bufs: HashMap::new(),
             init_map: HashMap::new(),
+            init_dsts: BTreeSet::new(),
             mod_cb0: 0,
             mod_cb1: 0,
             screen_w: 240,
@@ -169,6 +186,7 @@ impl Rt {
             gfx: crate::gfx::Gfx::default(),
             pending: Vec::new(),
             screens: Vec::new(),
+            sub_screen: 0,
             keys_down: 0,
             keys_up: 0,
             keys_hold: 0,
@@ -190,6 +208,8 @@ impl Rt {
             datapackage: 0,
             dfblock: 0,
             module_name: String::new(),
+            res_off: 0,
+            dp_full_path: 0,
             vfs: crate::vfs::Vfs::new(std::path::PathBuf::from("."), None),
             finds: HashMap::new(),
             next_find: 1,
@@ -207,6 +227,10 @@ impl Rt {
             dp_cache: HashMap::new(),
             pkg_entries: Vec::new(),
             pkg_wanted: Vec::new(),
+            dp_sizes: HashMap::new(),
+            ro_words: Vec::new(),
+            foreign_shadow: HashMap::new(),
+            foreign_cur: None,
             logs: Vec::new(),
         }
     }
@@ -326,8 +350,14 @@ fn h_initer(uc: &mut Emu) {
     };
     let dst = uc.arg(0);
     let src = get_manager(uc, get_off);
-    let n = mgr_size(get_off);
+    let mut n = mgr_size(get_off);
     if dst != 0 {
+
+        let rt = &mut uc.get_data_mut().rt;
+        rt.init_dsts.insert(dst);
+        if let Some(&next) = rt.init_dsts.range(dst + 1..).next() {
+            n = n.min(next - dst);
+        }
         if let Ok(buf) = uc.mem_read_as_vec(src as u64, n as usize) {
             uc.write(dst, &buf);
         }
@@ -571,6 +601,7 @@ pub fn setup(uc: &mut Emu, m: &cbelib::CbeModule) {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("assets/fatfs"));
         uc.get_data_mut().rt.vfs = crate::vfs::Vfs::new(root, Some(base));
+        uc.get_data_mut().rt.vfs.self_path = std::fs::canonicalize(&m.path).ok();
 
         uc.get_data_mut().rt.audio.outdir = Some(home.join("audio").join(dir));
     }
@@ -585,12 +616,31 @@ pub fn setup(uc: &mut Emu, m: &cbelib::CbeModule) {
         d.icons = m.icons.clone();
         d.packages = m.packages.clone();
         d.module_name = m.name.clone();
+        d.res_off = m.res_off;
+        let be = m.endian == cbelib::Endian::Be;
+        let mut w: Vec<u32> = m
+            .ro
+            .chunks_exact(4)
+            .map(|c| {
+                let b = [c[0], c[1], c[2], c[3]];
+                if be { u32::from_be_bytes(b) } else { u32::from_le_bytes(b) }
+            })
+            .collect();
+        w.sort_unstable();
+        w.dedup();
+        d.ro_words = w;
     }
 }
 
 pub const OLD_REGISTER_APP: u32 = 1950;
 
 pub const OLD_FETCH: u32 = 2001;
+
+pub const OLD_STR_WIDTH: u32 = 1016;
+
+pub const OLD_WCSLEN: u32 = 1048;
+
+pub const OLD_WSTR_WIDTH: u32 = 1107;
 
 pub const OLD_MEM_SID: u32 = 143;
 
@@ -664,6 +714,39 @@ fn h_old_syscall(uc: &mut Emu) {
         old_net(uc, sid);
         return;
     }
+    if sid == OLD_WCSLEN {
+
+        let p = uc.arg(1);
+        let mut n = 0u32;
+        while p != 0 && n < 0x10000 && uc.r16(p + 2 * n) != 0 {
+            n += 1;
+        }
+        uc.ret(n);
+        return;
+    }
+    if sid == OLD_WSTR_WIDTH {
+
+        let frame = uc.arg(1);
+        let (p, n) = if frame != 0 { (uc.r32(frame), (uc.r16(frame + 4) / 2) as usize) } else { (0, 0) };
+        let b = if p != 0 && n > 0 {
+            crate::api::text::gb18030_encode(&crate::api::fileio::wstr(uc, p, n))
+        } else {
+            Vec::new()
+        };
+        let w = crate::api::text::text_width(uc, &b) & 0xFFFF;
+        uc.ret(w);
+        return;
+    }
+    if sid == OLD_STR_WIDTH {
+
+        let frame = uc.arg(1);
+        let (sp, n) = if frame != 0 { (uc.r32(frame + 4), uc.r16(frame + 8) as usize) } else { (0, 0) };
+        let raw = if sp != 0 && n > 0 { uc.mem_read_as_vec(sp as u64, n).unwrap_or_default() } else { Vec::new() };
+        let s: Vec<u8> = raw.into_iter().take_while(|&b| b != 0).collect();
+        let w = crate::api::text::text_width(uc, &s) & 0xFFFF;
+        uc.ret(w);
+        return;
+    }
     if let Some(&(_, tag, name, spec)) = OLD_FORWARD.iter().find(|e| e.0 == sid) {
         old_forward(uc, tag, name, spec);
         return;
@@ -682,6 +765,9 @@ const OLD_FORWARD: &[(u32, &str, &str, &str)] = &[
     (142, "VmMemoryManagerTag", "mF_GetGMemoryBlockPtr", ""),
     (103, "VmMemoryManagerTag", "mF_InitMemoryBlock", "II"),
     (184, "VmMemoryManagerTag", "dF_ReleaseMemory", ""),
+
+    (174, "VmMemoryManagerTag", "mF_resetGmemoryBlock", ""),
+    (175, "VmMemoryManagerTag", "mF_MallocGmemoryBlock", "I"),
     (4, "VmSysManagerTag", "VmEnterWinClose", ""),
     (61, "GameManagerOldTag", "Storage_Date", "IIIBB"),
     (156, "VmDFEnginelManagerTag", "DF_SendMessage", "IHI"),
@@ -690,6 +776,8 @@ const OLD_FORWARD: &[(u32, &str, &str, &str)] = &[
     (1052, "VmIoManagerTag", "Vm_file_close", "I"),
     (1063, "VmIoManagerTag", "Vm_file_read", "III"),
     (1066, "VmIoManagerTag", "Vm_file_getfilesize", "I"),
+
+    (1064, "VmIoManagerTag", "Vm_file_seek", "III"),
 ];
 
 fn old_unpack(uc: &Emu, frame: u32, spec: &str) -> Vec<u32> {
@@ -913,6 +1001,11 @@ pub fn boot(uc: &mut Emu) -> u32 {
 
     if uc.get_data().rt.style == Style::Old {
         let g = machine::new_table_ex(uc, "GameManagerOld", 0x100, true);
+
+        let log = machine::new_trap(uc, "gm_TRACE", Some(h_vm_log));
+        debug_assert!(g + 8 <= crate::mem::layout::DATA_BASE + 0x1000, "只有首页可执行");
+        uc.w32(g, 0xE51F_F004);
+        uc.w32(g + 4, log);
         uc.get_data_mut().rt.game_tbl = g;
         uc.w32(host + 0x0c, g);
     }
@@ -998,6 +1091,24 @@ pub fn push_screen(uc: &mut Emu, scr: u32, param: u32, flag: u32) {
     let load = uc.r32(scr + 4 * S_LOADRES);
     defer(uc, init, vec![param], "screenInit");
     defer(uc, load, vec![param], "screenLoadResource");
+}
+
+pub fn change_sub_screen(uc: &mut Emu, scr: u32) {
+    let old = uc.get_data().rt.sub_screen;
+    if old != 0 {
+        let destroy = uc.r32(old + 4 * S_DESTROY);
+        defer(uc, destroy, vec![], "screenDestroy");
+    }
+    let rt = &mut uc.get_data_mut().rt;
+    rt.sub_screen = scr;
+    rt.screens.clear();
+    rt.screens.push((scr, 0, 1));
+    let init = uc.r32(scr + 4 * S_INIT);
+    defer(uc, init, vec![0], "screenInit");
+    if uc.get_data().rt.style == Style::Old {
+        let load = uc.r32(scr + 4 * S_LOADRES);
+        defer(uc, load, vec![0], "screenLoadResource");
+    }
 }
 
 pub fn app_start(uc: &mut Emu) -> u32 {

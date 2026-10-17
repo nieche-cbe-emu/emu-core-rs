@@ -35,6 +35,10 @@ pub struct State {
     pub slots: Vec<Slot>,
     pub trap_hits: HashMap<u32, u64>,
     pub null_calls: HashMap<u32, u64>,
+
+    pub host_errors: HashMap<(String, String), u64>,
+
+    pub r9_live: u32,
     pub last_trap: i64,
     pub same_trap: u32,
 
@@ -252,6 +256,8 @@ pub fn build(m: &cbelib::CbeModule) -> Result<Emu<'static>, String> {
         slots: Vec::new(),
         trap_hits: HashMap::new(),
         null_calls: HashMap::new(),
+        host_errors: HashMap::new(),
+        r9_live: p.rw_base,
         last_trap: -1,
         same_trap: 0,
         log_calls: true,
@@ -393,7 +399,8 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
             uc.get_data_mut().cur_slot = idx as u32;
 
             let h = uc.get_data().slots.get(idx).and_then(|s| s.handler);
-            match h {
+
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match h {
                 Some(f) => f(uc),
 
                 None => {
@@ -404,6 +411,9 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
                         uc.ret(0);
                     }
                 }
+            }));
+            if let Err(p) = r {
+                host_error(uc, idx, p.as_ref());
             }
 
             if uc.get_data().log_calls && std::env::var("TRACERET").is_ok() {
@@ -456,6 +466,28 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
     .map_err(e)?;
 
     Ok(())
+}
+
+fn host_error(uc: &mut Emu, idx: usize, payload: &(dyn std::any::Any + Send)) {
+    let msg = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".to_string());
+    let msg: String = msg.chars().take(60).collect();
+    let name = uc
+        .get_data()
+        .slots
+        .get(idx)
+        .map(|s| s.name.clone())
+        .unwrap_or_else(|| format!("trap#{idx}"));
+    let d = uc.get_data_mut();
+    let n = d.host_errors.entry((name.clone(), msg.clone())).or_insert(0);
+    *n += 1;
+    if *n == 1 {
+        d.rt.logs.push(format!("[宿主错误] {name}: {msg}"));
+    }
+    uc.ret(0);
 }
 
 pub fn new_trap(uc: &mut Emu, name: &str, handler: Option<ApiFn>) -> u32 {
@@ -550,8 +582,8 @@ pub fn call(uc: &mut Emu, addr: u32, args: &[u32]) -> u32 {
         uc.setreg(i as u32, a);
     }
     let _ = uc.reg_write(RegisterARM::SP, (STACK_BASE + STACK_SIZE - 0x1000) as u64);
-    let rw = uc.get_data().rw_base;
-    let _ = uc.reg_write(RegisterARM::R9, rw as u64);
+    let r9 = uc.get_data().r9_live;
+    let _ = uc.reg_write(RegisterARM::R9, r9 as u64);
     let _ = uc.reg_write(RegisterARM::LR, (RETURN_MAGIC | 1) as u64);
 
     let thumb = addr & 1 != 0;
@@ -586,6 +618,11 @@ pub fn call(uc: &mut Emu, addr: u32, args: &[u32]) -> u32 {
         }
     }
     uc.get_data_mut().in_emu = false;
+    if uc.get_data().exit_reason.is_none() {
+
+        let r9 = uc.reg(9);
+        uc.get_data_mut().r9_live = r9;
+    }
     uc.reg(0)
 }
 
@@ -613,4 +650,68 @@ pub fn selftest() -> bool {
         return false;
     }
     uc.reg_read(RegisterARM::R0) == Ok(3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blank_module() -> cbelib::CbeModule {
+        cbelib::CbeModule {
+            path: String::new(),
+            raw: Vec::new(),
+            name: "blank".into(),
+            load_base: 0,
+            image_size: 0x1000,
+            image_end: 0,
+            rw_size: 0x1000,
+            ro: vec![0; 0x1000],
+            rw: vec![0; 0x1000],
+            ro_off: 0,
+            rw_off: 0,
+            ro_chk: 0,
+            rw_chk: 0,
+            endian: cbelib::Endian::Le,
+            icons: None,
+            res: None,
+            packages: Vec::new(),
+            res_off: 0,
+        }
+    }
+
+    #[allow(clippy::useless_vec)]
+    fn panicky(_uc: &mut Emu) {
+        let v = vec![1u32, 2, 3];
+        let i = v.len() + 1;
+        let _ = v[i];
+    }
+
+    fn fine(uc: &mut Emu) {
+        uc.ret(42);
+    }
+
+    #[test]
+    fn handler_panic_is_contained() {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let mut uc = build(&blank_module()).expect("搭机器");
+        let bad = new_trap(&mut uc, "Bad", Some(panicky));
+        let good = new_trap(&mut uc, "Good", Some(fine));
+
+        assert_eq!(call(&mut uc, bad, &[7]), 0, "panic 之后按失败返回 0");
+        assert_eq!(call(&mut uc, good, &[]), 42, "之后的调用照常");
+        assert_eq!(call(&mut uc, bad, &[7]), 0);
+        std::panic::set_hook(prev);
+
+        let d = uc.get_data();
+        let n: u64 = d
+            .host_errors
+            .iter()
+            .filter(|((name, _), _)| name == "Bad")
+            .map(|(_, n)| *n)
+            .sum();
+        assert_eq!(n, 2, "两次都记上了");
+        let lines = d.rt.logs.iter().filter(|l| l.starts_with("[宿主错误] Bad")).count();
+        assert_eq!(lines, 1, "同一种错误只报一行，不刷屏");
+    }
 }

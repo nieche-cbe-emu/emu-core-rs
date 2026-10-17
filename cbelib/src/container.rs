@@ -186,15 +186,45 @@ pub fn parse_res(buf: &[u8], base: usize, size: usize, variant: bool) -> Result<
     }))
 }
 
+fn multi_dir_end(buf: &[u8], mut o: usize, count: usize) -> usize {
+    for _ in 0..count {
+        let ln = match buf.get(o) {
+            Some(&l) => l as usize,
+            None => break,
+        };
+        if ln == 0 || ln > 48 || o + 1 + ln + 4 > buf.len() {
+            break;
+        }
+        if !buf[o + 1..o + 1 + ln].iter().all(|&c| (32..127).contains(&c)) {
+            break;
+        }
+        o += 1 + ln + 4;
+    }
+    o
+}
+
+fn multi_header(buf: &[u8], base: usize) -> Option<(usize, usize)> {
+    let head = u32le(buf, base).ok()? as usize;
+    for cnt_at in [8usize, 4] {
+        let count = u32le(buf, base + cnt_at).ok()? as usize;
+        if count > 0 && count < 512 {
+            let o = base + cnt_at + 4;
+            if multi_dir_end(buf, o, count) - base == head + 4 {
+                return Some((count, o));
+            }
+        }
+    }
+    Some((u32le(buf, base + 8).ok()? as usize, base + 12))
+}
+
 pub fn parse_multi(buf: &[u8], base: usize, size: usize) -> Option<Vec<(String, ResArchive)>> {
     if size < 16 {
         return None;
     }
-    let count = u32le(buf, base + 8).ok()? as usize;
+    let (count, mut o) = multi_header(buf, base)?;
     if count == 0 || count >= 512 {
         return None;
     }
-    let mut o = base + 12;
     let mut ents: Vec<(String, usize)> = Vec::new();
     for _ in 0..count {
         if o >= base + size {
@@ -305,6 +335,8 @@ pub struct CbeModule {
     pub res: Option<ResArchive>,
 
     pub packages: Vec<(String, ResArchive)>,
+
+    pub res_off: u32,
 }
 
 impl fmt::Debug for CbeModule {
@@ -418,5 +450,6 @@ pub fn load_bytes(path: &str, d: Vec<u8>) -> Result<CbeModule> {
         icons,
         res,
         packages,
+        res_off: res_off as u32,
     })
 }

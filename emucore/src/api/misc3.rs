@@ -238,6 +238,7 @@ fn res_audio(uc: &Emu, rid: u32) -> Vec<u8> {
 }
 
 pub fn audio_play(uc: &mut Emu) {
+    crate::api::dfpkg::sync_foreign(uc);
     let (rid, looping) = (uc.arg(0), uc.arg(1) != 0);
     let data = res_audio(uc, rid);
     let now = uc.get_data().rt.tick;

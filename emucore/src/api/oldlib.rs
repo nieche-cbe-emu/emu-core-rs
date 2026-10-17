@@ -434,6 +434,11 @@ fn noop(_uc: &mut Emu) {}
 pub fn init_repaint_panel(uc: &mut Emu) {
     let p = uc.arg(0);
     let (xy, wh, ud_logic, ud_paint, n) = (uc.arg(1), uc.arg(2), uc.arg(3), uc.arg(4), uc.arg(5));
+    init_panel(uc, p, xy, wh, ud_logic, ud_paint, n);
+    uc.ret(0);
+}
+
+fn init_panel(uc: &mut Emu, p: u32, xy: u32, wh: u32, ud_logic: u32, ud_paint: u32, n: u32) {
     let table = if n != 0 { alloc(uc, 4 * n, "panel_dirty") } else { 0 };
     uc.w32(p + 12, table);
     for i in 0..n {
@@ -464,7 +469,6 @@ pub fn init_repaint_panel(uc: &mut Emu) {
     uc.w32(p + 60, t);
     uc.w32(p + 36, 0);
     invalidate(uc, p, 4, p + 24);
-    uc.ret(0);
 }
 
 fn last_sibling(uc: &Emu, mut p: u32) -> u32 {
@@ -654,20 +658,24 @@ fn pic_create_blank(uc: &mut Emu) {
 }
 
 fn pic_load(uc: &mut Emu) {
+    crate::api::dfpkg::sync_foreign(uc);
     let lib = uc.arg(0);
     let raw = uc.cstr(uc.arg(1), 256).unwrap_or_default();
     let name = String::from_utf8_lossy(&raw).to_string();
-    let rid = crate::api::dfpkg::res_index(uc, &name).map(|i| i as i32).unwrap_or(-1);
+    let n = pic_load_name(uc, lib, &name);
+    uc.ret(n as u32);
+}
+
+fn pic_load_name(uc: &mut Emu, lib: u32, name: &str) -> i32 {
+    let rid = crate::api::dfpkg::res_index(uc, name).map(|i| i as i32).unwrap_or(-1);
     let (n, cap) = (rs16(uc, lib + 20), rs16(uc, lib + 8));
     if rid < 0 || n >= cap {
-        uc.ret(0xFFFF_FFFF);
-        return;
+        return -1;
     }
     let ids = uc.r32(lib + 12);
     for i in 0..n.max(0) {
         if rs16(uc, ids + 2 * i as u32) == s16(rid) {
-            uc.ret(i as u32);
-            return;
+            return i;
         }
     }
     let hn = gfx::header_size(uc);
@@ -680,7 +688,7 @@ fn pic_load(uc: &mut Emu) {
     crate::api::gfx_api::img_from_stream(uc);
     w16(uc, (ids as i64 + 2 * n as i64) as u32, rid);
     w16(uc, lib + 20, n + 1);
-    uc.ret(n as u32);
+    n
 }
 
 fn pic_release(uc: &mut Emu) {
@@ -1526,4 +1534,161 @@ pub fn num_to_zhifei(uc: &mut Emu) {
     uc.write(p, &text);
     uc.get_data_mut().rt.host_bufs.insert(KEYS[key], p);
     uc.ret(p);
+}
+
+pub fn init_df_map(uc: &mut Emu) {
+    let (m, xy, wh, lib) = (uc.arg(0), uc.arg(1), uc.arg(2), uc.arg(3));
+    let sp = uc.reg_read(unicorn_engine::RegisterARM::SP).unwrap_or(0) as u32;
+    let (name_p, n) = (uc.r32(sp), uc.r32(sp + 4));
+    let methods: [(u32, &'static str, ApiFn); 3] = [
+        (0x70, "DF_Map+0x70", map_reload),
+        (0x74, "DF_Map+0x74", map_set_view),
+        (0x78, "DF_Map+0x78", map_move_view),
+    ];
+    for (off, name, f) in methods {
+        let t = runtime::method(uc, name, f);
+        uc.w32(m + off, t);
+    }
+    uc.w32(m + 0x24, lib);
+    init_panel(uc, m + 0x28, xy, wh, m, m, n);
+    let t = runtime::method(uc, "DF_Map+0x58", map_draw);
+    uc.w32(m + 0x58, t);
+    w16(uc, m + 0x20, 0);
+    w16(uc, m + 0x22, 0);
+    let raw = uc.cstr(name_p, 256).unwrap_or_default();
+    let name: String = raw.iter().map(|&c| c as char).collect();
+    map_load(uc, m, &name);
+    uc.ret(0);
+}
+
+fn map_load(uc: &mut Emu, m: u32, name: &str) {
+    crate::api::dfpkg::sync_foreign(uc);
+    let data = crate::api::dfpkg::entry_bytes_by_name(uc, name).unwrap_or_default();
+    let raw = if data.first() == Some(&2) {
+        cbelib::lz::unpack_entry(&data).unwrap_or_default()
+    } else {
+        data
+    };
+    let mut pos = 0usize;
+    let rint = |pos: &mut usize| -> i32 {
+        if *pos + 4 > raw.len() {
+            return 0;
+        }
+        let v = i32::from_le_bytes([raw[*pos], raw[*pos + 1], raw[*pos + 2], raw[*pos + 3]]);
+        *pos += 4;
+        v
+    };
+    let lib = uc.r32(m + 0x24);
+    let nset = rint(&mut pos).max(0);
+    let ids = alloc(uc, 2 * nset as u32, "map_tilesets");
+    uc.w32(m + 0x1c, ids);
+    for i in 0..nset as u32 {
+        let n = raw.get(pos).copied().unwrap_or(0) as usize;
+        let s: String = raw
+            .get(pos + 1..(pos + 1 + n).min(raw.len()))
+            .unwrap_or(&[])
+            .iter()
+            .map(|&c| c as char)
+            .collect();
+        pos += 1 + n;
+        let idx = pic_load_name(uc, lib, &s);
+        w16(uc, ids + 2 * i, idx);
+    }
+    let (pw, ph, tw, th) = (rint(&mut pos), rint(&mut pos), rint(&mut pos), rint(&mut pos));
+    for (i, v) in [pw, ph, tw, th].into_iter().enumerate() {
+        uc.w32(m + 4 * i as u32, v as u32);
+    }
+    let cols = if tw != 0 { cdiv(pw, tw) } else { 0 };
+    let rows = if th != 0 { cdiv(ph, th) } else { 0 };
+    uc.w32(m + 0x10, cols as u32);
+    uc.w32(m + 0x14, rows as u32);
+    let table = alloc(uc, 4 * cols.max(0) as u32, "map_cols");
+    uc.w32(m + 0x18, table);
+    for c in 0..cols.max(0) as u32 {
+        let col = alloc(uc, 4 * rows.max(0) as u32, "map_cells");
+        uc.w32(table + 4 * c, col);
+        for r in 0..rows.max(0) as u32 {
+            let v = rint(&mut pos);
+            uc.w32(col + 4 * r, v as u32);
+        }
+    }
+}
+
+fn map_reload(uc: &mut Emu) {
+    let m = uc.arg(0);
+    let raw = uc.cstr(uc.arg(1), 256).unwrap_or_default();
+    let name: String = raw.iter().map(|&c| c as char).collect();
+    map_load(uc, m, &name);
+    uc.ret(0);
+}
+
+fn map_set_view(uc: &mut Emu) {
+    let m = uc.arg(0);
+    let (x, y) = (uc.arg(1) as i32, uc.arg(2) as i32);
+    w16(uc, m + 0x20, x);
+    w16(uc, m + 0x22, y);
+    uc.ret(m);
+}
+
+fn map_move_view(uc: &mut Emu) {
+    let m = uc.arg(0);
+    let (dx, dy) = (a16(uc, 1), a16(uc, 2));
+    let (x, y) = (rs16(uc, m + 0x20), rs16(uc, m + 0x22));
+    w16(uc, m + 0x20, x + dx);
+    w16(uc, m + 0x22, y + dy);
+    uc.ret(m);
+}
+
+fn map_cell(uc: &Emu, m: u32, col: i32, row: i32) -> u32 {
+    let colp = uc.r32((uc.r32(m + 0x18) as i64 + 4 * col as i64) as u32);
+    uc.r32((colp as i64 + 4 * row as i64) as u32)
+}
+
+fn map_draw(uc: &mut Emu) {
+    let m = uc.arg(0);
+    let (sx, sy) = (rs16(uc, m + 64), rs16(uc, m + 66));
+    let (vx, vy) = (rs16(uc, m + 0x20), rs16(uc, m + 0x22));
+    let tw = uc.r32(m + 8) as i32;
+    let th = uc.r32(m + 12) as i32;
+    let cols = uc.r32(m + 16) as i32;
+    let rows = uc.r32(m + 20) as i32;
+    if tw > 0 && th > 0 {
+        let (ox, oy, w, h) = (0, 0, SCREEN_W, SCREEN_H);
+        let lib = uc.r32(m + 0x24);
+        let ids = uc.r32(m + 0x1c);
+        let c0 = cdiv(vx + ox, tw).max(0);
+        let r0 = cdiv(vy + oy, th).max(0);
+        let c1 = cdiv(w + vx + ox + tw - 1, tw).min(cols - 1);
+        let r1 = cdiv(h + vy + oy + th - 1, th).min(rows - 1);
+        let target = uc.r32(lib + 4);
+        let target = if target != 0 { target } else { uc.get_data().rt.gfx.img };
+        let mut x = sx - cmod(vx + ox, tw);
+        for c in c0..=c1 {
+            let mut y = sy - cmod(vy + oy, th);
+            for r in r0..=r1 {
+                let cell = map_cell(uc, m, c, r);
+                let pic = rs16(uc, ids + 2 * ((cell >> 24) & 0xF));
+                let img = pic_img(uc, lib, pic);
+                let per_row = cdiv(gfx::img_wh(uc, img).0 as i32, tw);
+                let frame = (cell & 0xFF_FFFF) as i32;
+                if per_row > 0 {
+                    clipped_blit(
+                        uc,
+                        target,
+                        img,
+                        cmod(frame, per_row) * tw,
+                        cdiv(frame, per_row) * th,
+                        tw,
+                        th,
+                        ox + x,
+                        oy + y,
+                        false,
+                    );
+                }
+                y += th;
+            }
+            x += tw;
+        }
+    }
+    uc.ret(0);
 }

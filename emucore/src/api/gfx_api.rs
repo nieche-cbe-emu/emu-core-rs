@@ -186,6 +186,7 @@ pub fn draw_img_clip_alpha(uc: &mut Emu) {
 }
 
 pub fn img_from_res(uc: &mut Emu) {
+    crate::api::dfpkg::sync_foreign(uc);
     let p = uc.arg(0);
     if p < 0x10000 {
 

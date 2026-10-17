@@ -35,8 +35,24 @@ const METHODS: &[(u32, &str, crate::machine::ApiFn)] = &[
 
 pub const DP_SIZE_OLD: u32 = 0x4c;
 
-fn dp_size(uc: &Emu) -> u32 {
-    if uc.get_data().rt.gamelib_v3 {
+fn dp_size(uc: &Emu, pkg: u32) -> u32 {
+    let rt = &uc.get_data().rt;
+    if rt.gamelib_v3 {
+        DP_SIZE_OLD
+    } else {
+        rt.dp_sizes.get(&pkg).copied().unwrap_or(0x6c)
+    }
+}
+
+fn dp_size_for(uc: &Emu, pkg: u32) -> u32 {
+    let rt = &uc.get_data().rt;
+    if rt.gamelib_v3 {
+        return DP_SIZE_OLD;
+    }
+    let lo = pkg.wrapping_add(DP_SIZE_OLD);
+    let w = &rt.ro_words;
+    let i = w.partition_point(|&x| x < lo);
+    if i < w.len() && w[i] < pkg.wrapping_add(0x6c) {
         DP_SIZE_OLD
     } else {
         0x6c
@@ -50,7 +66,8 @@ pub fn init_df_datapackage(uc: &mut Emu) {
         uc.ret(0);
         return;
     }
-    let size = dp_size(uc);
+    let size = dp_size_for(uc, pkg);
+    uc.get_data_mut().rt.dp_sizes.insert(pkg, size);
     for o in [0x04u32, 0x0c, 0x10, 0x18, 0x1c, 0x64] {
         if o < size {
             uc.w32(pkg + o, 0);
@@ -83,27 +100,70 @@ pub fn init_df_datapackage(uc: &mut Emu) {
     uc.write(pkg + off::SUB_PACKAGE_NUM, &(nsub as u16).to_le_bytes());
     for &(o, name, f) in METHODS {
         if o < size {
+            if o == 0x44 && uc.get_data().rt.gamelib_v3 {
+                reserve_full_path(uc, pkg + o);
+            }
             runtime::install(uc, pkg + o, name, f);
         }
     }
     uc.ret(pkg);
 }
 
-fn pick_entries(uc: &Emu, name: &str) -> (String, Vec<(String, Vec<u8>)>) {
+const FULL_PATH_GAP: u32 = 0x34;
+
+fn reserve_full_path(uc: &mut Emu, field: u32) {
+    if uc.get_data().rt.installed.contains_key(&(field, "DP_GetFileID")) {
+        return;
+    }
+    crate::machine::new_trap(uc, "dfDataPackageGetFullPath", Some(dp_full_path));
+    for _ in 0..FULL_PATH_GAP / 4 - 1 {
+        crate::machine::new_trap(uc, "dp_pad", None);
+    }
+}
+
+fn dp_full_path(uc: &mut Emu) {
+    let mut buf = uc.get_data().rt.dp_full_path;
+    if buf == 0 {
+        buf = uc
+            .get_data_mut()
+            .heap
+            .alloc(0x204, "dfDataPackageGetFullPath", false)
+            .unwrap_or(0);
+        if buf != 0 {
+            crate::api::fill(uc, buf, 0, 0x200);
+            let le = uc.get_data().le;
+            for (i, ch) in crate::vfs::SELF_PATH.encode_utf16().enumerate() {
+                let b = if le { ch.to_le_bytes() } else { ch.to_be_bytes() };
+                uc.write(buf + 2 * i as u32, &b);
+            }
+            let ro = uc.get_data().rt.res_off;
+            uc.w32(buf + 0x200, ro);
+            uc.get_data_mut().rt.dp_full_path = buf;
+        }
+    }
+    uc.ret(buf);
+}
+
+fn pick_entries(uc: &Emu, names: &[String]) -> (String, Vec<(String, Vec<u8>)>) {
     let rt = &uc.get_data().rt;
     let root = rt.packages.iter().find(|(k, _)| k.is_empty());
-    let mut arch = None;
-    if !name.is_empty() && !rt.packages.is_empty() {
-        arch = rt.packages.iter().find(|(k, _)| k == name);
-        if arch.is_none() {
-            let base = name
-                .rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(name);
-            arch = rt
+    let mut subs: Vec<&(String, cbelib::ResArchive)> = Vec::new();
+    for name in names {
+        if name.is_empty() || rt.packages.is_empty() {
+            continue;
+        }
+        let mut hit = rt.packages.iter().find(|(k, _)| k == name);
+        if hit.is_none() {
+            let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+            hit = rt
                 .packages
                 .iter()
                 .find(|(k, _)| !k.is_empty() && (k == base || k.eq_ignore_ascii_case(base)));
+        }
+        if let Some(h) = hit {
+            if !h.0.is_empty() && !subs.iter().any(|s| s.0 == h.0) {
+                subs.push(h);
+            }
         }
     }
     let flat = |a: &cbelib::ResArchive| -> Vec<(String, Vec<u8>)> {
@@ -112,7 +172,7 @@ fn pick_entries(uc: &Emu, name: &str) -> (String, Vec<(String, Vec<u8>)>) {
             .map(|e| (e.name.clone(), e.data.clone()))
             .collect()
     };
-    let Some((k, a)) = arch else {
+    if subs.is_empty() {
         return match root {
             Some((_, r)) => ("<root>".to_string(), flat(r)),
             None => (
@@ -124,22 +184,26 @@ fn pick_entries(uc: &Emu, name: &str) -> (String, Vec<(String, Vec<u8>)>) {
                     .unwrap_or_default(),
             ),
         };
-    };
-    let key = format!("<sub>{k}");
-    let Some((_, r)) = root else { return (key, flat(a)) };
-
+    }
+    if root.is_none() && subs.len() == 1 {
+        return (format!("<sub>{}", subs[0].0), flat(&subs[0].1));
+    }
     let mut ents: Vec<(String, Vec<u8>)> = Vec::new();
     let mut pos: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for e in r.entries.iter().chain(a.entries.iter()) {
-        match pos.get(&e.name) {
-            Some(&i) => ents[i] = (e.name.clone(), e.data.clone()),
-            None => {
-                pos.insert(e.name.clone(), ents.len());
-                ents.push((e.name.clone(), e.data.clone()));
+    let parts = root.into_iter().chain(subs.iter().copied());
+    for (_, a) in parts {
+        for e in &a.entries {
+            match pos.get(&e.name) {
+                Some(&i) => ents[i] = (e.name.clone(), e.data.clone()),
+                None => {
+                    pos.insert(e.name.clone(), ents.len());
+                    ents.push((e.name.clone(), e.data.clone()));
+                }
             }
         }
     }
-    (format!("<comb>{k}"), ents)
+    let key: Vec<&str> = subs.iter().map(|s| s.0.as_str()).collect();
+    (format!("<comb>{}", key.join("|")), ents)
 }
 
 fn materialize(uc: &mut Emu, pkg: u32, key: &str, ents: &[(String, Vec<u8>)]) -> u32 {
@@ -197,11 +261,27 @@ fn materialize(uc: &mut Emu, pkg: u32, key: &str, ents: &[(String, Vec<u8>)]) ->
     uc.w32(pkg + off::FILE_NAME_TABLE, names_tbl);
     uc.w32(pkg + off::FILE_OFFSET_TABLE, offs_tbl);
     uc.w32(pkg + off::FILE_DATA, data_p);
-    if off::DATA_SIZE < dp_size(uc) {
+    if off::DATA_SIZE < dp_size(uc, pkg) {
         uc.w32(pkg + off::DATA_SIZE, total);
     }
     uc.write(pkg + off::IS_LOADED, &[1]);
     n
+}
+
+fn registered(uc: &Emu, pkg: u32) -> Vec<String> {
+    uc.get_data()
+        .rt
+        .pkg_wanted
+        .iter()
+        .find(|(k, _)| *k == pkg)
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default()
+}
+
+fn mount(uc: &mut Emu, pkg: u32, names: &[String]) {
+    let (key, ents) = pick_entries(uc, names);
+    materialize(uc, pkg, &key, &ents);
+    set_pkg_entries(uc, pkg, &ents);
 }
 
 pub fn dp_load(uc: &mut Emu) {
@@ -209,20 +289,19 @@ pub fn dp_load(uc: &mut Emu) {
     let nameptr = uc.arg(1);
     let raw = uc.cstr(nameptr, 256).unwrap_or_default();
     let name = String::from_utf8_lossy(&raw).to_string();
-    let (key, ents) = pick_entries(uc, &name);
-    materialize(uc, pkg, &key, &ents);
-    set_pkg_entries(uc, pkg, &ents);
     if !name.is_empty() {
         let w = &mut uc.get_data_mut().rt.pkg_wanted;
         match w.iter_mut().find(|(k, _)| *k == pkg) {
             Some(e) => {
                 if !e.1.contains(&name) {
-                    e.1.push(name);
+                    e.1.push(name.clone());
                 }
             }
-            None => w.push((pkg, vec![name])),
+            None => w.push((pkg, vec![name.clone()])),
         }
     }
+    let names = if name.is_empty() { Vec::new() } else { registered(uc, pkg) };
+    mount(uc, pkg, &names);
     uc.w32(pkg + off::PACKAGE_NAME, nameptr);
     uc.ret(0);
 }
@@ -324,7 +403,33 @@ pub fn dp_load_tres(uc: &mut Emu) {
 
 pub fn dp_release(uc: &mut Emu) {
     let p = uc.arg(0);
-    uc.write(p + off::IS_LOADED, &[0]);
+    let np = uc.arg(1);
+    let name = if np != 0 {
+        String::from_utf8_lossy(&uc.cstr(np, 256).unwrap_or_default()).to_string()
+    } else {
+        String::new()
+    };
+    if name.is_empty() {
+        if let Some(e) = uc.get_data_mut().rt.pkg_wanted.iter_mut().find(|(k, _)| *k == p) {
+            e.1.clear();
+        }
+        uc.write(p + off::IS_LOADED, &[0]);
+    } else {
+        let removed = match uc.get_data_mut().rt.pkg_wanted.iter_mut().find(|(k, _)| *k == p) {
+            Some(e) => match e.1.iter().position(|n| *n == name) {
+                Some(i) => {
+                    e.1.remove(i);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        if removed {
+            let names = registered(uc, p);
+            mount(uc, p, &names);
+        }
+    }
     uc.ret(0);
 }
 
@@ -342,6 +447,9 @@ pub fn entries_opt(uc: &Emu, pkg: Option<u32>) -> Vec<(String, u32)> {
     if let Some(p) = pkg.or(Some(rt.datapackage).filter(|&d| d != 0)) {
         if let Some((_, v)) = rt.pkg_entries.iter().find(|(k, _)| *k == p) {
             return v.clone();
+        }
+        if let Some(sh) = foreign_now(uc, p) {
+            return sh.2.clone();
         }
     }
     if let Some((_, v)) = rt.pkg_entries.first() {
@@ -418,6 +526,91 @@ pub fn dp_get_file(uc: &mut Emu) {
     uc.ret(data + o);
 }
 
+fn foreign_now<'a, 'b>(uc: &'a Emu<'b>, pkg: u32) -> Option<&'a (u32, Vec<u32>, Vec<(String, u32)>)> {
+    let rt = &uc.get_data().rt;
+    if pkg != rt.datapackage {
+        return None;
+    }
+    let (p, key) = rt.foreign_cur.as_ref()?;
+    if *p != pkg {
+        return None;
+    }
+    rt.foreign_shadow.get(key)
+}
+
+pub fn sync_foreign(uc: &mut Emu) {
+    let pkg = uc.get_data().rt.datapackage;
+    uc.get_data_mut().rt.foreign_cur = None;
+    let names = {
+        let rt = &uc.get_data().rt;
+        if pkg == 0 || rt.packages.is_empty() || rt.pkg_entries.iter().any(|(k, _)| *k == pkg) {
+            return;
+        }
+        if uc.r8(pkg + off::IS_LOADED) != 1 {
+            return;
+        }
+        let n = uc.r16(pkg + off::SUB_PACKAGE_NUM) as i16 as i32;
+        let subs = uc.r32(pkg + off::SUB_DATA_PACKAGE);
+        if !(1..=64).contains(&n) || subs == 0 {
+            return;
+        }
+        let mut names: Vec<String> = Vec::new();
+        for i in 0..n as u32 {
+            let q = uc.r32(subs + 4 * i);
+            if q == 0 {
+                continue;
+            }
+            let np = uc.r32(q + off::PACKAGE_NAME);
+            let raw = uc.cstr(np, 256).unwrap_or_default();
+            let nm: String = raw.iter().map(|&c| c as char).collect();
+            if !nm.is_empty() && !names.contains(&nm) {
+                names.push(nm);
+            }
+        }
+        names
+    };
+    if names.is_empty() {
+        return;
+    }
+    let (key, ents) = pick_entries(uc, &names);
+    if !uc.get_data().rt.foreign_shadow.contains_key(&key) {
+        let blob: Vec<u8> = ents.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+        let data_p = uc
+            .get_data_mut()
+            .heap
+            .alloc(blob.len().max(1) as u32, "dp_shadow", false)
+            .unwrap_or(0);
+        if data_p != 0 && !blob.is_empty() {
+            uc.write(data_p, &blob);
+        }
+        let mut offs = Vec::with_capacity(ents.len());
+        let mut cur = 0u32;
+        for (_, d) in &ents {
+            offs.push(cur);
+            cur += d.len() as u32;
+        }
+        let meta: Vec<(String, u32)> = ents.iter().map(|(n, d)| (n.clone(), d.len() as u32)).collect();
+        uc.get_data_mut().rt.foreign_shadow.insert(key.clone(), (data_p, offs, meta));
+    }
+    uc.get_data_mut().rt.foreign_cur = Some((pkg, key));
+}
+
+pub fn entry_bytes_by_name(uc: &Emu, name: &str) -> Option<Vec<u8>> {
+    let ents = entries_opt(uc, None);
+    let i = ents.iter().position(|(n, _)| n == name)?;
+    let size = ents[i].1 as usize;
+    let p = res_ptr(uc, i);
+    if p != 0 {
+        return uc.mem_read_as_vec(p as u64, size).ok();
+    }
+    let rt = &uc.get_data().rt;
+    rt.res
+        .as_ref()
+        .or(rt.icons.as_ref())
+        .and_then(|a| a.entries.iter().find(|e| e.name == name))
+        .map(|e| e.data.clone())
+}
+
 pub fn res_index(uc: &Emu, name: &str) -> Option<usize> {
     entries_opt(uc, None).iter().position(|(n, _)| n == name)
 }
@@ -426,6 +619,9 @@ pub fn res_ptr(uc: &Emu, i: usize) -> u32 {
     let pkg = uc.get_data().rt.datapackage;
     if pkg == 0 {
         return 0;
+    }
+    if let Some(sh) = foreign_now(uc, pkg) {
+        return sh.1.get(i).map(|&o| sh.0 + o).unwrap_or(0);
     }
     let data = uc.r32(pkg + off::FILE_DATA);
     let offs = uc.r32(pkg + off::FILE_OFFSET_TABLE);
@@ -436,6 +632,7 @@ pub fn res_ptr(uc: &Emu, i: usize) -> u32 {
 }
 
 pub fn df_res_id_by_name(uc: &mut Emu) {
+    sync_foreign(uc);
     let raw = uc.cstr(uc.arg(0), 256).unwrap_or_default();
     let name = String::from_utf8_lossy(&raw).to_string();
     match res_index(uc, &name) {
@@ -445,6 +642,7 @@ pub fn df_res_id_by_name(uc: &mut Emu) {
 }
 
 pub fn df_res_by_name(uc: &mut Emu) {
+    sync_foreign(uc);
     let raw = uc.cstr(uc.arg(0), 256).unwrap_or_default();
     let name = String::from_utf8_lossy(&raw).to_string();
     let p = res_index(uc, &name).map(|i| res_ptr(uc, i)).unwrap_or(0);
@@ -460,6 +658,7 @@ pub fn df_res_by_name(uc: &mut Emu) {
 }
 
 pub fn df_res_by_id(uc: &mut Emu) {
+    sync_foreign(uc);
     let i = uc.arg(0);
     let n = entries_opt(uc, None).len() as u32;
     let p = if i < n { res_ptr(uc, i as usize) } else { 0 };
@@ -474,6 +673,7 @@ pub fn res_ptr_by_name(uc: &Emu, name: &str) -> u32 {
 }
 
 pub fn df_res_name_by_id(uc: &mut Emu) {
+    sync_foreign(uc);
     let pkg = uc.get_data().rt.datapackage;
     let i = uc.arg(0);
     let tbl = if pkg != 0 {
@@ -486,14 +686,11 @@ pub fn df_res_name_by_id(uc: &mut Emu) {
 }
 
 pub fn entry_data(uc: &Emu, i: usize) -> Option<Vec<u8>> {
-    let pkg = uc.get_data().rt.datapackage;
     let ents = entries_opt(uc, None);
     let (_, size) = ents.get(i)?;
-    let data = uc.r32(pkg + off::FILE_DATA);
-    let offs = uc.r32(pkg + off::FILE_OFFSET_TABLE);
-    if data == 0 || offs == 0 {
+    let p = res_ptr(uc, i);
+    if p == 0 {
         return None;
     }
-    let o = uc.r32(offs + i as u32 * 4);
-    uc.mem_read_as_vec((data + o) as u64, *size as usize).ok()
+    uc.mem_read_as_vec(p as u64, *size as usize).ok()
 }

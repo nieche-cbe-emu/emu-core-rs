@@ -269,6 +269,7 @@ pub static ENTRIES: &[Entry] = &[
     e!(GAME_T, "DrawLineEx", oldlib::draw_line_ex),
     e!(GAME_T, "initDFPictureLibrary", oldlib::init_picture_library),
     e!(GAME_T, "initDFWindows", oldlib::init_repaint_panel),
+    e!(GAME_T, "initDFMap", oldlib::init_df_map),
     e!("VmDFEnginelManagerTag", "DF_SendMessage", oldlib::panel_invalidate),
     e!(GAME_T, "OldLib_094", mem::malloc_big),
     e!(GAME_T, "OldLib_098", mem::free_big),

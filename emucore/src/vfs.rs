@@ -22,7 +22,12 @@ pub struct Vfs {
     pub base: Option<PathBuf>,
     pub handles: HashMap<u32, File>,
     next_h: u32,
+
+    pub self_path: Option<PathBuf>,
 }
+
+pub const SELF_PATH: &str = "C:\\.nieche\\self.cbe";
+const SELF_NORM: &str = ".nieche/self.cbe";
 
 impl Vfs {
     pub fn new(root: PathBuf, base: Option<PathBuf>) -> Vfs {
@@ -37,6 +42,7 @@ impl Vfs {
             base,
             handles: HashMap::new(),
             next_h: 1,
+            self_path: None,
         }
     }
 
@@ -69,6 +75,11 @@ impl Vfs {
 
     pub fn resolve(&self, path: &str) -> PathBuf {
         let rel = Self::norm(path);
+        if rel.eq_ignore_ascii_case(SELF_NORM) {
+            if let Some(p) = &self.self_path {
+                return p.clone();
+            }
+        }
         let over = ci_join(&self.root, &rel);
         if over.exists() {
             return over;
@@ -97,13 +108,24 @@ impl Vfs {
             "r".to_string()
         };
         let writing = m.contains('w') || m.contains('a') || m.contains('+');
+        if Self::norm(path).eq_ignore_ascii_case(SELF_NORM) {
+
+            let Some(p) = self.self_path.clone().filter(|_| !writing) else {
+                return OPEN_FAIL;
+            };
+            let Ok(f) = File::open(p) else { return OPEN_FAIL };
+            let h = self.next_h;
+            self.next_h += 1;
+            self.handles.insert(h, f);
+            return h;
+        }
         let hp = if writing {
             self.host_path(path)
         } else {
             self.resolve(path)
         };
 
-        if path.is_empty() || path.ends_with('\\') || path.ends_with('/') {
+        if path.is_empty() || path.ends_with('\\') || path.ends_with('/') || hp.is_dir() {
             return OPEN_FAIL;
         }
         let create = m.contains('w') || m.contains('a');
