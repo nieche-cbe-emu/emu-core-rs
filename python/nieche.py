@@ -87,6 +87,11 @@ def _bind(lib):
         ("nieche_name", [p, u8p, sz], sz),
         ("nieche_take_events", [p, u8p, sz], sz),
         ("nieche_take_logs", [p, u8p, sz], sz),
+        ("nieche_cheat_search", [p, c.c_uint32, c.c_int64], c.c_uint32),
+        ("nieche_cheat_reset", [p], None),
+        ("nieche_cheat_results", [p, c.POINTER(c.c_uint32), sz], sz),
+        ("nieche_cheat_write", [p, c.c_uint32, c.c_uint32, c.c_int64], c.c_int32),
+        ("nieche_cheat_lock", [p, c.c_uint32, c.c_uint32, c.c_int64, c.c_int32], None),
     ]
     for name, argtypes, restype in sig:
         f = getattr(lib, name)
@@ -177,6 +182,25 @@ class NiecheSession:
 
     def take_logs(self):
         return self._take(self.lib.nieche_take_logs)
+
+    def cheat_search(self, width, value):
+
+        return self.lib.nieche_cheat_search(self.h, int(width), int(value))
+
+    def cheat_reset(self):
+        self.lib.nieche_cheat_reset(self.h)
+
+    def cheat_results(self, limit=200):
+
+        buf = (ctypes.c_uint32 * (2 * limit))()
+        n = self.lib.nieche_cheat_results(self.h, buf, limit)
+        return [(buf[2 * i], buf[2 * i + 1]) for i in range(n)]
+
+    def cheat_write(self, addr, width, value):
+        return self.lib.nieche_cheat_write(self.h, int(addr), int(width), int(value)) == 1
+
+    def cheat_lock(self, addr, width, value, on=True):
+        self.lib.nieche_cheat_lock(self.h, int(addr), int(width), int(value), 1 if on else 0)
 
     @property
     def size(self):

@@ -194,3 +194,49 @@ pub extern "C" fn nieche_selftest() -> i32 {
 pub extern "C" fn nieche_abi_version() -> u32 {
     2
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_cheat_search(s: *mut Session, width: u32, value: i64) -> u32 {
+    if s.is_null() {
+        return 0;
+    }
+    let s = &mut *s;
+    catch_unwind(AssertUnwindSafe(|| s.inner.cheat_search(width, value))).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_cheat_reset(s: *mut Session) {
+    if !s.is_null() {
+        (*s).inner.cheat_reset();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_cheat_results(s: *mut Session, out: *mut u32, cap: usize) -> usize {
+    if s.is_null() || out.is_null() {
+        return 0;
+    }
+    let s = &mut *s;
+    let rows = catch_unwind(AssertUnwindSafe(|| s.inner.cheat_results(cap))).unwrap_or_default();
+    for (i, (a, v)) in rows.iter().enumerate() {
+        *out.add(2 * i) = *a;
+        *out.add(2 * i + 1) = *v;
+    }
+    rows.len()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_cheat_write(s: *mut Session, addr: u32, width: u32, value: i64) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    let s = &mut *s;
+    catch_unwind(AssertUnwindSafe(|| s.inner.cheat_write(addr, width, value) as i32)).unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_cheat_lock(s: *mut Session, addr: u32, width: u32, value: i64, on: i32) {
+    if !s.is_null() {
+        (*s).inner.cheat_lock(addr, width, value, on != 0);
+    }
+}

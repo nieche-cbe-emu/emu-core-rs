@@ -20,6 +20,11 @@ pub struct Slot {
 
 pub const BUDGET: usize = 100_000_000;
 
+const SH_WRITEC: u32 = 0x03;
+const SH_WRITE0: u32 = 0x04;
+const SH_WRITE: u32 = 0x05;
+const SH_EXIT: u32 = 0x18;
+
 pub const CALL_LOG_CAP: usize = 4096;
 
 pub struct State {
@@ -424,6 +429,57 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
             }
         },
     )
+    .map_err(e)?;
+
+    uc.add_intr_hook(|uc: &mut Emu, intno: u32| {
+        if intno != 2 {
+            return;
+        }
+        let pc = uc.reg(15);
+        let thumb = uc.reg_read(RegisterARM::CPSR).unwrap_or(0) & 0x20 != 0;
+        let imm = if thumb {
+            match uc.mem_read_as_vec(pc.wrapping_sub(2) as u64, 1) {
+                Ok(b) => b[0] as u32,
+                Err(_) => return,
+            }
+        } else {
+            match uc.mem_read_as_vec(pc.wrapping_sub(4) as u64, 4) {
+                Ok(b) => u32::from_le_bytes([b[0], b[1], b[2], b[3]]) & 0xFF_FFFF,
+                Err(_) => return,
+            }
+        };
+        if imm != 0xAB {
+            return;
+        }
+        let (op, arg) = (uc.reg(0), uc.reg(1));
+        match op {
+            SH_WRITEC => {
+                if let Ok(b) = uc.mem_read_as_vec(arg as u64, 1) {
+                    uc.get_data_mut().semihost_out.extend_from_slice(&b);
+                }
+            }
+            SH_WRITE0 => {
+                let s = uc.cstr(arg, 512).unwrap_or_default();
+                uc.get_data_mut().semihost_out.extend_from_slice(&s);
+            }
+            SH_WRITE => {
+                let (p, n) = (uc.r32(arg + 4), uc.r32(arg + 8));
+                if let Ok(b) = uc.mem_read_as_vec(p as u64, n.min(0x10000) as usize) {
+                    uc.get_data_mut().semihost_out.extend_from_slice(&b);
+                }
+                uc.setreg(0, 0);
+            }
+            SH_EXIT => {
+                uc.get_data_mut().exit_reason = Some("模块调用了 semihosting SYS_EXIT".into());
+                let _ = uc.emu_stop();
+            }
+            _ => uc.setreg(0, 0),
+        }
+        let out = &mut uc.get_data_mut().semihost_out;
+        if out.len() > 1 << 20 {
+            out.drain(..1 << 19);
+        }
+    })
     .map_err(e)?;
 
     uc.add_code_hook(0, (NULL_GUARD - 1) as u64, |uc: &mut Emu, _a, _s| {

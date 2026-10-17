@@ -92,6 +92,8 @@ pub fn release_image(uc: &mut Emu) {
     let screen = uc.get_data().rt.gfx.img;
     if vt != 0 && vt != screen {
         let data = uc.r32(vt);
+
+        uc.get_data_mut().rt.gfx.by_stream.retain(|_, v| *v != vt);
         if data != 0 {
             uc.get_data_mut().rt.gfx.masks.remove(&data);
             uc.get_data_mut().heap.free(data);

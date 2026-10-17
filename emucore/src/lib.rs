@@ -1,6 +1,7 @@
 
 pub mod api;
 pub mod audio;
+pub mod cheat;
 pub mod font;
 pub mod gfx;
 pub mod machine;

@@ -107,6 +107,8 @@ pub struct Session {
     events: Vec<Event>,
     pub alive: bool,
     booted: bool,
+
+    pub cheat: crate::cheat::Cheat,
 }
 
 fn now_secs() -> f64 {
@@ -142,6 +144,7 @@ impl Session {
             events: Vec::new(),
             alive: true,
             booted: false,
+            cheat: crate::cheat::Cheat::default(),
         })
     }
 
@@ -315,6 +318,7 @@ impl Session {
         }
         self.apply_input(now);
         let (event, data) = self.key_event();
+        self.cheat.apply_locks(&mut self.uc);
 
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             runtime::frame(&mut self.uc, event, data);
@@ -365,6 +369,26 @@ impl Session {
         self.uc.get_data_mut().rt.logs.clear();
         self.nlog = 0;
         joined
+    }
+
+    pub fn cheat_search(&mut self, width: u32, value: i64) -> u32 {
+        self.cheat.search(&self.uc, width, value)
+    }
+
+    pub fn cheat_reset(&mut self) {
+        self.cheat.reset();
+    }
+
+    pub fn cheat_results(&self, limit: usize) -> Vec<(u32, u32)> {
+        self.cheat.results(&self.uc, limit)
+    }
+
+    pub fn cheat_write(&mut self, addr: u32, width: u32, value: i64) -> bool {
+        crate::cheat::Cheat::write(&mut self.uc, addr, width, value)
+    }
+
+    pub fn cheat_lock(&mut self, addr: u32, width: u32, value: i64, on: bool) {
+        self.cheat.lock(addr, width, value, on);
     }
 
     pub fn size(&self) -> (u32, u32) {
