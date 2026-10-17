@@ -48,6 +48,8 @@ pub struct Rt {
     pub init_map: HashMap<u32, u32>,
 
     pub init_dsts: BTreeSet<u32>,
+
+    pub old_billing: bool,
     pub mod_cb0: u32,
     pub mod_cb1: u32,
     pub screen_w: u32,
@@ -172,6 +174,7 @@ impl Rt {
             host_bufs: HashMap::new(),
             init_map: HashMap::new(),
             init_dsts: BTreeSet::new(),
+            old_billing: false,
             mod_cb0: 0,
             mod_cb1: 0,
             screen_w: 240,
@@ -356,7 +359,13 @@ fn h_initer(uc: &mut Emu) {
         let rt = &mut uc.get_data_mut().rt;
         rt.init_dsts.insert(dst);
         if let Some(&next) = rt.init_dsts.range(dst + 1..).next() {
-            n = n.min(next - dst);
+            if next - dst < n {
+                n = next - dst;
+                if mgr_tag(get_off) == Some("VmBillingManagerTag") {
+
+                    rt.old_billing = true;
+                }
+            }
         }
         if let Ok(buf) = uc.mem_read_as_vec(src as u64, n as usize) {
             uc.write(dst, &buf);
@@ -396,11 +405,15 @@ fn slot_off(uc: &Emu) -> u32 {
     d.slots[d.cur_slot as usize].off
 }
 
-fn mgr_size(get_off: u32) -> u32 {
-    let tag = vmspec::SYS
+fn mgr_tag(get_off: u32) -> Option<&'static str> {
+    vmspec::SYS
         .iter()
         .find(|(o, _, _)| *o == get_off)
-        .and_then(|(_, _, t)| *t);
+        .and_then(|(_, _, t)| *t)
+}
+
+fn mgr_size(get_off: u32) -> u32 {
+    let tag = mgr_tag(get_off);
     match tag.and_then(vmspec::mgr) {
         Some(m) if m.size != 0 => m.size,
         _ => 0x400,

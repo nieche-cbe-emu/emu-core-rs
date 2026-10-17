@@ -23,7 +23,8 @@ pub fn billing_send_sms(uc: &mut Emu) {
         return;
     }
     let cb = uc.arg(6);
-    runtime::defer(uc, cb, vec![0], "smsResult");
+    let ok = u32::from(uc.get_data().rt.old_billing);
+    runtime::defer(uc, cb, vec![ok], "smsResult");
     uc.ret(1);
 }
 

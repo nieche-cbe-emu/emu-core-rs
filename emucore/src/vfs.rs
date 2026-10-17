@@ -26,6 +26,26 @@ pub struct Vfs {
     pub self_path: Option<PathBuf>,
 }
 
+pub fn downinfo_blob() -> Vec<u8> {
+    let name = b"offline";
+    let mut body = vec![0u8; 8];
+    body.push(name.len() as u8);
+    body.extend_from_slice(name);
+    body.extend_from_slice(&[0, 0, 0, 0, 1, 1]);
+    body.extend_from_slice(&[0u8; 12]);
+    body.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0]);
+    body.extend_from_slice(&[0u8; 11]);
+    body.resize(0x80, 0);
+    let n = (body.len() - 4) as u16;
+    body[2..4].copy_from_slice(&n.to_be_bytes());
+    let mut out = Vec::new();
+    for chunk in body.chunks(127) {
+        out.push(0x80 | chunk.len() as u8);
+        out.extend_from_slice(chunk);
+    }
+    out
+}
+
 pub const SELF_PATH: &str = "C:\\.nieche\\self.cbe";
 const SELF_NORM: &str = ".nieche/self.cbe";
 
@@ -99,6 +119,12 @@ impl Vfs {
         GLUE_PREFIXES.iter().any(|p| base.starts_with(p))
     }
 
+    pub fn synth_content(path: &str) -> Option<Vec<u8>> {
+        let n = Self::norm(path);
+        let base = n.rsplit('/').next().unwrap_or("").to_lowercase();
+        (base == "downinfo.dat").then(downinfo_blob)
+    }
+
     pub fn open(&mut self, path: &str, mode: &str) -> u32 {
         let m = mode.to_lowercase();
         let m = if m.chars().any(|c| "rwa+".contains(c)) {
@@ -130,7 +156,11 @@ impl Vfs {
         }
         let create = m.contains('w') || m.contains('a');
         if !hp.exists() {
-            if !create && Self::is_glue_file(path) {
+            let synth = if create { None } else { Self::synth_content(path) };
+            if let Some(data) = synth {
+                mkparent(&hp);
+                let _ = std::fs::write(&hp, data);
+            } else if !create && Self::is_glue_file(path) {
                 mkparent(&hp);
                 let _ = File::create(&hp);
             } else if !create {
@@ -267,6 +297,14 @@ fn mkparent(p: &Path) {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn downinfo_blob_matches_python() {
+        let want = "ff0000007c00000000076f66666c696e650000000001010000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000008100";
+        let got: String = downinfo_blob().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(got, want);
+    }
+
     use super::*;
 
     #[test]

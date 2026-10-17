@@ -399,6 +399,7 @@ pub static ENTRIES: &[Entry] = &[
     e!(SYS_T, "vMAudioIsSupportInCb", misc3::audio_supported),
     e!(SYS_T, "VMGetOperator", misc::zero),
     e!(STD_T, "vMstrnicmp", misc3::strnicmp),
+    e!(UTIL_T, "Game_strnicmp", misc3::strnicmp),
     e!(MEM_T, "mF_MemoryBlock_Malloc", misc3::block_malloc),
     e!(GAME_T, "SCREEN_NotifyLoadResource", misc3::screen_notify_loadres),
     e!(BILL_T, "BILLING_GetCdownOption5", misc::zero),
