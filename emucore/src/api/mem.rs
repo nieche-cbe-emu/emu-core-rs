@@ -70,20 +70,59 @@ pub fn remalloc_big(uc: &mut Emu) {
     uc.ret(p);
 }
 
-pub fn get_gblock(uc: &mut Emu) {
+fn gblock_ptr(uc: &mut Emu) -> u32 {
     let cur = uc.get_data().rt.gblock;
-    let p = if cur != 0 {
-        cur
-    } else {
-        let a = uc
-            .get_data_mut()
-            .heap
-            .alloc(0x20, "MemoryBlock", false)
-            .unwrap_or(0);
-        uc.get_data_mut().rt.gblock = a;
-        a
-    };
+    if cur != 0 {
+        return cur;
+    }
+    let a = uc
+        .get_data_mut()
+        .heap
+        .alloc(0x20, "MemoryBlock", false)
+        .unwrap_or(0);
+    if a != 0 {
+        fill(uc, a, 0, 0x20);
+    }
+    uc.get_data_mut().rt.gblock = a;
+    a
+}
+
+pub fn get_gblock(uc: &mut Emu) {
+    let p = gblock_ptr(uc);
     uc.ret(p);
+}
+
+pub fn init_gblock(uc: &mut Emu) {
+    let size = uc.arg(0);
+    let blk = gblock_ptr(uc);
+    if blk != 0 && (size as i32) > 0 {
+        let old = uc.r32(blk);
+        if old != 0 {
+            uc.get_data_mut().heap.free(old);
+        }
+        crate::api::sysmisc::setup_memory_block(uc, blk, size);
+    }
+    uc.ret(0);
+}
+
+pub fn release_gblock(uc: &mut Emu) {
+    let blk = uc.get_data().rt.gblock;
+    if blk != 0 && (uc.r32(blk + 8) as i32) > 0 {
+        let base = uc.r32(blk);
+        if base != 0 {
+            uc.get_data_mut().heap.free(base);
+        }
+        uc.w32(blk + 8, 0);
+    }
+    uc.ret(0);
+}
+
+pub fn reset_gblock(uc: &mut Emu) {
+    let blk = uc.get_data().rt.gblock;
+    if blk != 0 && (uc.r32(blk + 8) as i32) > 0 {
+        uc.w32(blk + 4, 0);
+    }
+    uc.ret(0);
 }
 
 pub fn gblock_malloc(uc: &mut Emu) {

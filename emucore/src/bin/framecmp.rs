@@ -1,4 +1,5 @@
 
+use emucore::machine::Mach;
 use emucore::{gfx, machine, runtime};
 use std::process::ExitCode;
 
@@ -72,6 +73,7 @@ fn main() -> ExitCode {
     }
 
     let mut rows: Vec<String> = Vec::with_capacity(frames);
+    let mut evbuf: u32 = 0;
     for i in 0..frames {
         uc.get_data_mut().call_log.clear();
 
@@ -92,9 +94,25 @@ fn main() -> ExitCode {
         } else if i % 37 == 4 {
             runtime::release_all(&mut uc);
         }
-        runtime::frame(&mut uc, runtime::NO_EVENT, 0);
 
-        if std::env::var("TRACE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) {
+        let mut ev = (runtime::NO_EVENT, 0);
+        if let Ok(es) = std::env::var("EVENTS") {
+            for it in es.split(',') {
+                let p: Vec<&str> = it.split(':').collect();
+                if p.len() == 3 && p[0].parse::<usize>().ok() == Some(i) {
+                    if evbuf == 0 {
+                        evbuf = uc.get_data_mut().data.alloc(4, "EventBuf", true).unwrap_or(0);
+                    }
+                    let v = u32::from_str_radix(p[2].trim_start_matches("0x"), 16).unwrap_or(0);
+                    uc.w32(evbuf, v);
+                    ev = (p[1].parse().unwrap_or(runtime::NO_EVENT), evbuf);
+                }
+            }
+        }
+        runtime::frame(&mut uc, ev.0, ev.1);
+
+        if std::env::var("TRACE").ok().and_then(|v| v.parse::<usize>().ok()) == Some(i) || std::env::var("TRACEALL").is_ok() {
+            if std::env::var("TRACEALL").is_ok() { eprintln!("== frame {i}"); }
             for n in uc.get_data().call_log.iter() {
                 eprintln!("{n}");
             }
@@ -138,6 +156,19 @@ fn main() -> ExitCode {
         let names: Vec<&str> = uc.get_data().call_log.iter().map(|s| s.as_str()).collect();
         let cl = cbelib::crc32(names.join("\n").as_bytes());
         rows.push(format!("{i} {fb:08x} {cl:08x} {}", names.len()));
+    }
+
+    if std::env::var("ENDDIAG").is_ok() {
+        let (screens, sub, npend, exit) = {
+            let d = uc.get_data();
+            (d.rt.screens.clone(), d.rt.sub_screen, d.rt.pending.len(), d.exit_reason.clone())
+        };
+        eprintln!("  屏幕栈 {} 个，子屏 {sub:#x}，待办 {npend}，退出 {exit:?}", screens.len());
+        for (scr, param, flag) in screens {
+            let slots: Vec<String> = (0..8).map(|k| format!("{:#x}", uc.r32(scr + 4 * k))).collect();
+            eprintln!("    屏幕 {scr:#x} param={param:#x} flag={flag} 槽 {}", slots.join(" "));
+        }
+        eprintln!("  定时器 {} 个", uc.get_data().rt.timers.len());
     }
     if std::env::var("UNIMPL").is_ok() {
         let d = uc.get_data();

@@ -75,6 +75,8 @@ pub struct Rt {
     pub screens: Vec<(u32, u32, u32)>,
 
     pub sub_screen: u32,
+
+    pub next_screen: Option<(u32, u32, u32)>,
     pub keys_down: u32,
     pub keys_up: u32,
     pub keys_hold: u32,
@@ -145,6 +147,8 @@ pub struct Rt {
 
     pub dp_sizes: HashMap<u32, u32>,
 
+    pub dp_caps: HashMap<u32, u32>,
+
     pub ro_words: Vec<u32>,
 
     pub foreign_shadow: HashMap<String, (u32, Vec<u32>, Vec<(String, u32)>)>,
@@ -190,6 +194,7 @@ impl Rt {
             pending: Vec::new(),
             screens: Vec::new(),
             sub_screen: 0,
+            next_screen: None,
             keys_down: 0,
             keys_up: 0,
             keys_hold: 0,
@@ -231,6 +236,7 @@ impl Rt {
             pkg_entries: Vec::new(),
             pkg_wanted: Vec::new(),
             dp_sizes: HashMap::new(),
+            dp_caps: HashMap::new(),
             ro_words: Vec::new(),
             foreign_shadow: HashMap::new(),
             foreign_cur: None,
@@ -1124,6 +1130,24 @@ pub fn change_sub_screen(uc: &mut Emu, scr: u32) {
     }
 }
 
+fn try_change_screen(uc: &mut Emu) {
+    let Some((scr, param, flag)) = uc.get_data_mut().rt.next_screen.take() else {
+        return;
+    };
+    if let Some((old, op, _)) = uc.get_data_mut().rt.screens.pop() {
+        let destroy = uc.r32(old + 4 * S_DESTROY);
+        if destroy != 0 {
+            machine::call(uc, destroy, &[op]);
+        }
+    }
+    uc.get_data_mut().rt.screens.push((scr, param, flag));
+    let init = uc.r32(scr + 4 * S_INIT);
+    if init != 0 {
+        machine::call(uc, init, &[param]);
+    }
+    pump(uc, 64);
+}
+
 pub fn app_start(uc: &mut Emu) -> u32 {
     let cb0 = uc.get_data().rt.mod_cb0;
     let r = if cb0 != 0 { machine::call(uc, cb0, &[]) } else { 0 };
@@ -1162,6 +1186,7 @@ pub fn frame(uc: &mut Emu, event: u32, data: u32) {
     }
     fire_timers(uc);
     pump(uc, 64);
+    try_change_screen(uc);
 
     let live = uc.get_data().rt.screens.clone();
     for &(scr, param, _) in live.iter().rev() {

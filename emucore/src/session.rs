@@ -98,6 +98,8 @@ pub struct Session {
 
     touch: Option<(i32, i32, Touch)>,
     touch_queue: Vec<(i32, i32, Touch)>,
+
+    pen_events: Vec<(u32, u32)>,
     soft: Option<SoftPending>,
 
     kev: u32,
@@ -137,6 +139,7 @@ impl Session {
             rep_next: HashMap::new(),
             touch: None,
             touch_queue: Vec::new(),
+            pen_events: Vec::new(),
             soft: None,
             kev,
             frame_no: 0,
@@ -272,7 +275,16 @@ impl Session {
         }
 
         if !self.touch_queue.is_empty() {
-            self.touch = Some(self.touch_queue.remove(0));
+            let (x, y, st) = self.touch_queue.remove(0);
+            let ev = match st {
+                Touch::Down => 3,
+                Touch::Up => 4,
+                Touch::Move => 5,
+            };
+            if self.pen_events.len() < 64 {
+                self.pen_events.push((ev, ((y as u32) << 16) | (x as u32 & 0xFFFF)));
+            }
+            self.touch = Some((x, y, st));
         }
         if let Some((x, y, st)) = self.touch {
             let rt = &mut self.uc.get_data_mut().rt;
@@ -304,6 +316,12 @@ impl Session {
             let k = self.kev;
             self.uc.w32(k, u);
             return (1, k);
+        }
+        if !self.pen_events.is_empty() {
+            let (ev, v) = self.pen_events.remove(0);
+            let k = self.kev;
+            self.uc.w32(k, v);
+            return (ev, k);
         }
         (runtime::NO_EVENT, 0)
     }

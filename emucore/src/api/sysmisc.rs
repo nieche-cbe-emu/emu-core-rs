@@ -172,6 +172,11 @@ pub fn init_memory_block(uc: &mut Emu) {
             return;
         }
     }
+    setup_memory_block(uc, blk, size);
+    uc.ret(blk);
+}
+
+pub fn setup_memory_block(uc: &mut Emu, blk: u32, size: u32) {
     let base = if size != 0 {
         uc.get_data_mut()
             .heap
@@ -189,7 +194,6 @@ pub fn init_memory_block(uc: &mut Emu) {
     runtime::install(uc, blk + 0x0c, "MB_Malloc", mb_malloc);
     runtime::install(uc, blk + 0x10, "MB_Reset", mb_reset);
     runtime::install(uc, blk + 0x14, "MB_Release", mb_release);
-    uc.ret(blk);
 }
 
 fn mb_malloc(uc: &mut Emu) {

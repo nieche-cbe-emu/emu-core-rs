@@ -661,7 +661,7 @@ fn pic_load(uc: &mut Emu) {
     crate::api::dfpkg::sync_foreign(uc);
     let lib = uc.arg(0);
     let raw = uc.cstr(uc.arg(1), 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
+    let name = crate::api::dfpkg::latin1(&raw);
     let n = pic_load_name(uc, lib, &name);
     uc.ret(n as u32);
 }

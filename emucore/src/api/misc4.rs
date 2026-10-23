@@ -48,15 +48,13 @@ pub fn is_key_up(uc: &mut Emu) {
 
 pub fn change_screen(uc: &mut Emu) {
     let scr = uc.arg(0);
-    uc.get_data_mut().rt.screens.clear();
-    runtime::push_screen(uc, scr, 0, 1);
+    uc.get_data_mut().rt.next_screen = Some((scr, 0, 1));
     uc.ret(0);
 }
 
 pub fn change_screen_ex(uc: &mut Emu) {
     let (scr, param, flag) = (uc.arg(0), uc.arg(1), uc.arg(2));
-    uc.get_data_mut().rt.screens.clear();
-    runtime::push_screen(uc, scr, param, flag);
+    uc.get_data_mut().rt.next_screen = Some((scr, param, flag & 0xFF));
     uc.ret(0);
 }
 

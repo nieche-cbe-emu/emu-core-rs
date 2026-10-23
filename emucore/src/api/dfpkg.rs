@@ -17,6 +17,14 @@ pub mod off {
     pub const TXT_FILE_DATA: u32 = 0x64;
 }
 
+pub fn latin1(raw: &[u8]) -> String {
+    raw.iter().map(|&c| c as char).collect()
+}
+
+pub fn latin1_bytes(s: &str) -> Vec<u8> {
+    s.chars().map(|c| c as u32 as u8).collect()
+}
+
 const METHODS: &[(u32, &str, crate::machine::ApiFn)] = &[
     (0x20, "DP_LoadPackage", dp_load),
     (0x24, "DP_ReleasePackage", dp_release),
@@ -97,7 +105,8 @@ pub fn init_df_datapackage(uc: &mut Emu) {
         }
     }
 
-    uc.write(pkg + off::SUB_PACKAGE_NUM, &(nsub as u16).to_le_bytes());
+    uc.write(pkg + off::SUB_PACKAGE_NUM, &0u16.to_le_bytes());
+    uc.get_data_mut().rt.dp_caps.insert(pkg, nsub);
     for &(o, name, f) in METHODS {
         if o < size {
             if o == 0x44 && uc.get_data().rt.gamelib_v3 {
@@ -233,7 +242,7 @@ fn materialize(uc: &mut Emu, pkg: u32, key: &str, ents: &[(String, Vec<u8>)]) ->
                 .unwrap_or(0);
             let mut cur = 0u32;
             for (i, (nm, d)) in ents.iter().enumerate() {
-                let bytes = nm.as_bytes();
+                let bytes = latin1_bytes(nm);
                 let p = uc
                     .get_data_mut()
                     .heap
@@ -288,7 +297,7 @@ pub fn dp_load(uc: &mut Emu) {
     let pkg = uc.arg(0);
     let nameptr = uc.arg(1);
     let raw = uc.cstr(nameptr, 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
+    let name = latin1(&raw);
     if !name.is_empty() {
         let w = &mut uc.get_data_mut().rt.pkg_wanted;
         match w.iter_mut().find(|(k, _)| *k == pkg) {
@@ -303,7 +312,120 @@ pub fn dp_load(uc: &mut Emu) {
     let names = if name.is_empty() { Vec::new() } else { registered(uc, pkg) };
     mount(uc, pkg, &names);
     uc.w32(pkg + off::PACKAGE_NAME, nameptr);
+    if !name.is_empty() {
+        attach_sub(uc, pkg, &name);
+    }
     uc.ret(0);
+}
+
+const SUB_SIZE: u32 = 0x6c;
+const SUB_FILE_ID_TABLE: u32 = 0x14;
+
+fn sub_name(uc: &Emu, sub: u32) -> String {
+    let raw = uc.cstr(uc.r32(sub + off::PACKAGE_NAME), 256).unwrap_or_default();
+    latin1(&raw)
+}
+
+fn sub_archive(uc: &Emu, name: &str) -> Option<(String, Vec<(String, Vec<u8>)>)> {
+    let rt = &uc.get_data().rt;
+    let mut hit = rt.packages.iter().find(|(k, _)| k == name);
+    if hit.is_none() {
+        let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+        hit = rt
+            .packages
+            .iter()
+            .find(|(k, _)| !k.is_empty() && (k == base || k.eq_ignore_ascii_case(base)));
+    }
+    let (k, a) = hit.filter(|(k, _)| !k.is_empty())?;
+    let ents = a.entries.iter().map(|e| (e.name.clone(), e.data.clone())).collect();
+    Some((k.clone(), ents))
+}
+
+fn attach_sub(uc: &mut Emu, pkg: u32, name: &str) {
+    let Some(&cap) = uc.get_data().rt.dp_caps.get(&pkg) else { return };
+    let arr = uc.r32(pkg + off::SUB_DATA_PACKAGE);
+    if arr == 0 || cap == 0 {
+        return;
+    }
+    let n = (uc.r16(pkg + off::SUB_PACKAGE_NUM) as u32).min(cap);
+
+    if (0..n).any(|i| {
+        let q = uc.r32(arr + 4 * i);
+        q != 0 && sub_name(uc, q) == name
+    }) {
+        return;
+    }
+    let Some(i) = (0..n).find(|&i| uc.r32(arr + 4 * i) == 0).or((n < cap).then_some(n)) else {
+        return;
+    };
+
+    let used: Vec<u8> = (0..n)
+        .map(|k| uc.r32(arr + 4 * k))
+        .filter(|&q| q != 0)
+        .map(|q| uc.r8(q + 1))
+        .collect();
+    let index = (2u8..=255).find(|v| !used.contains(v)).unwrap_or(0);
+    let Ok(sub) = uc.get_data_mut().heap.alloc(SUB_SIZE, "subDataPackageObj", false) else {
+        return;
+    };
+    if sub == 0 {
+        return;
+    }
+    crate::api::fill(uc, sub, 0, SUB_SIZE);
+    let np = uc
+        .get_data_mut()
+        .heap
+        .alloc(name.chars().count() as u32 + 1, "subPackageName", false)
+        .unwrap_or(0);
+    if np != 0 {
+        let mut v = latin1_bytes(name);
+        v.push(0);
+        uc.write(np, &v);
+    }
+    uc.w32(sub + off::PACKAGE_NAME, np);
+    uc.write(sub + 1, &[index]);
+    uc.w32(arr + 4 * i, sub);
+    if i == n {
+        uc.write(pkg + off::SUB_PACKAGE_NUM, &((n + 1) as u16).to_le_bytes());
+    }
+    let Some((k, ents)) = sub_archive(uc, name) else { return };
+    let nf = materialize(uc, sub, &format!("<sub>{k}"), &ents);
+    let ids = uc
+        .get_data_mut()
+        .heap
+        .alloc(nf.max(1) * 2, "subFileIds", false)
+        .unwrap_or(0);
+    for j in 0..nf {
+        let id = ((index as u32) << 8) + j;
+        uc.write(ids + 2 * j, &(id as u16).to_le_bytes());
+    }
+    uc.w32(sub + SUB_FILE_ID_TABLE, ids);
+    set_pkg_entries(uc, sub, &ents);
+}
+
+fn detach_subs(uc: &mut Emu, pkg: u32, name: Option<&str>) {
+    let arr = uc.r32(pkg + off::SUB_DATA_PACKAGE);
+    let Some(&cap) = uc.get_data().rt.dp_caps.get(&pkg) else { return };
+    if arr == 0 {
+        return;
+    }
+    let n = (uc.r16(pkg + off::SUB_PACKAGE_NUM) as u32).min(cap);
+    for i in 0..n {
+        let q = uc.r32(arr + 4 * i);
+        if q == 0 || name.is_some_and(|nm| sub_name(uc, q) != nm) {
+            continue;
+        }
+        let np = uc.r32(q + off::PACKAGE_NAME);
+        let ids = uc.r32(q + SUB_FILE_ID_TABLE);
+        let h = &mut uc.get_data_mut().heap;
+        for p in [np, ids, q] {
+            if p != 0 {
+                h.free(p);
+            }
+        }
+        uc.get_data_mut().rt.pkg_entries.retain(|(k, _)| *k != q);
+        uc.w32(arr + 4 * i, 0);
+    }
 }
 
 fn set_pkg_entries(uc: &mut Emu, pkg: u32, ents: &[(String, Vec<u8>)]) {
@@ -405,7 +527,7 @@ pub fn dp_release(uc: &mut Emu) {
     let p = uc.arg(0);
     let np = uc.arg(1);
     let name = if np != 0 {
-        String::from_utf8_lossy(&uc.cstr(np, 256).unwrap_or_default()).to_string()
+        latin1(&uc.cstr(np, 256).unwrap_or_default())
     } else {
         String::new()
     };
@@ -413,8 +535,10 @@ pub fn dp_release(uc: &mut Emu) {
         if let Some(e) = uc.get_data_mut().rt.pkg_wanted.iter_mut().find(|(k, _)| *k == p) {
             e.1.clear();
         }
+        detach_subs(uc, p, None);
         uc.write(p + off::IS_LOADED, &[0]);
     } else {
+        detach_subs(uc, p, Some(&name));
         let removed = match uc.get_data_mut().rt.pkg_wanted.iter_mut().find(|(k, _)| *k == p) {
             Some(e) => match e.1.iter().position(|n| *n == name) {
                 Some(i) => {
@@ -451,6 +575,9 @@ pub fn entries_opt(uc: &Emu, pkg: Option<u32>) -> Vec<(String, u32)> {
         if let Some(sh) = foreign_now(uc, p) {
             return sh.2.clone();
         }
+        if let Some(v) = live_entries(uc, p) {
+            return v;
+        }
     }
     if let Some((_, v)) = rt.pkg_entries.first() {
         return v.clone();
@@ -465,16 +592,65 @@ pub fn entries_opt(uc: &Emu, pkg: Option<u32>) -> Vec<(String, u32)> {
     .unwrap_or_default()
 }
 
+fn live_entries(uc: &Emu, pkg: u32) -> Option<Vec<(String, u32)>> {
+    if uc.r8(pkg + off::IS_LOADED) != 1 || uc.r16(pkg + off::SUB_PACKAGE_NUM) != 0 {
+        return None;
+    }
+    let n = uc.r16(pkg + off::FILE_NUM) as i16;
+    let names = uc.r32(pkg + off::FILE_NAME_TABLE);
+    let offs = uc.r32(pkg + off::FILE_OFFSET_TABLE);
+    if !(1..=4096).contains(&n) || names == 0 || offs == 0 || uc.r32(pkg + off::FILE_DATA) == 0 {
+        return None;
+    }
+    let n = n as u32;
+    let total = uc.r32(pkg + off::DATA_SIZE);
+    let mut v = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let raw = uc.cstr(uc.r32(names + 4 * i), 256).unwrap_or_default();
+        let o = uc.r32(offs + 4 * i);
+        let end = if i + 1 < n { uc.r32(offs + 4 * (i + 1)) } else { total };
+        v.push((latin1(&raw), end.saturating_sub(o)));
+    }
+    Some(v)
+}
+
+fn live_ids(uc: &Emu, pkg: u32) -> Option<Vec<i16>> {
+    if pkg == 0 || uc.get_data().rt.pkg_entries.iter().any(|(k, _)| *k == pkg) || foreign_now(uc, pkg).is_some() {
+        return None;
+    }
+    let n = live_entries(uc, pkg)?.len() as u32;
+    let ids = uc.r32(pkg + SUB_FILE_ID_TABLE);
+    if ids == 0 {
+        return None;
+    }
+    Some((0..n).map(|i| uc.r16(ids + 2 * i) as i16).collect())
+}
+
+fn id_of(uc: &Emu, pkg: u32, idx: usize) -> u32 {
+    match live_ids(uc, pkg) {
+        Some(ids) => ids[idx] as i32 as u32,
+        None => idx as u32,
+    }
+}
+
+fn idx_of(uc: &Emu, pkg: u32, id: u32) -> u32 {
+    match live_ids(uc, pkg) {
+        Some(ids) => ids.iter().position(|&v| v == id as i16).map(|i| i as u32).unwrap_or(u32::MAX),
+        None => id,
+    }
+}
+
 pub fn entries_for(uc: &Emu, pkg: u32) -> Vec<(String, u32)> {
     entries_opt(uc, Some(pkg))
 }
 
 pub fn dp_file_id(uc: &mut Emu) {
     let raw = uc.cstr(uc.arg(1), 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
-    let ents = entries_for(uc, uc.arg(0));
+    let name = latin1(&raw);
+    let pkg = uc.arg(0);
+    let ents = entries_for(uc, pkg);
     match ents.iter().position(|(n, _)| *n == name) {
-        Some(i) => uc.ret(i as u32),
+        Some(i) => uc.ret(id_of(uc, pkg, i) & 0xFFFF),
 
         None => uc.ret(0xFFFF),
     }
@@ -482,7 +658,7 @@ pub fn dp_file_id(uc: &mut Emu) {
 
 pub fn dp_name_by_id(uc: &mut Emu) {
     let pkg = uc.arg(0);
-    let i = uc.arg(1) & 0xFFFF;
+    let i = idx_of(uc, pkg, uc.arg(1) & 0xFFFF);
     let tbl = uc.r32(pkg + off::FILE_NAME_TABLE);
     let n = entries_for(uc, pkg).len() as u32;
     if tbl != 0 && i < n {
@@ -495,7 +671,7 @@ pub fn dp_name_by_id(uc: &mut Emu) {
 
 pub fn dp_get_by_id(uc: &mut Emu) {
     let pkg = uc.arg(0);
-    let i = uc.arg(1) & 0xFFFF;
+    let i = idx_of(uc, pkg, uc.arg(1) & 0xFFFF);
     let data = uc.r32(pkg + off::FILE_DATA);
     let offs = uc.r32(pkg + off::FILE_OFFSET_TABLE);
     let n = entries_for(uc, pkg).len() as u32;
@@ -510,7 +686,7 @@ pub fn dp_get_by_id(uc: &mut Emu) {
 pub fn dp_get_file(uc: &mut Emu) {
     let pkg = uc.arg(0);
     let raw = uc.cstr(uc.arg(1), 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
+    let name = latin1(&raw);
     let ents = entries_for(uc, pkg);
     let Some(i) = ents.iter().position(|(n, _)| *n == name) else {
         uc.ret(0);
@@ -562,7 +738,7 @@ pub fn sync_foreign(uc: &mut Emu) {
             }
             let np = uc.r32(q + off::PACKAGE_NAME);
             let raw = uc.cstr(np, 256).unwrap_or_default();
-            let nm: String = raw.iter().map(|&c| c as char).collect();
+            let nm = latin1(&raw);
             if !nm.is_empty() && !names.contains(&nm) {
                 names.push(nm);
             }
@@ -634,9 +810,9 @@ pub fn res_ptr(uc: &Emu, i: usize) -> u32 {
 pub fn df_res_id_by_name(uc: &mut Emu) {
     sync_foreign(uc);
     let raw = uc.cstr(uc.arg(0), 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
+    let name = latin1(&raw);
     match res_index(uc, &name) {
-        Some(i) => uc.ret(i as u32),
+        Some(i) => uc.ret(id_of(uc, uc.get_data().rt.datapackage, i)),
         None => uc.ret(0xFFFF_FFFF),
     }
 }
@@ -644,7 +820,7 @@ pub fn df_res_id_by_name(uc: &mut Emu) {
 pub fn df_res_by_name(uc: &mut Emu) {
     sync_foreign(uc);
     let raw = uc.cstr(uc.arg(0), 256).unwrap_or_default();
-    let name = String::from_utf8_lossy(&raw).to_string();
+    let name = latin1(&raw);
     let p = res_index(uc, &name).map(|i| res_ptr(uc, i)).unwrap_or(0);
     if std::env::var("RESDBG").is_ok() {
         let pkg = uc.get_data().rt.datapackage;
@@ -659,7 +835,7 @@ pub fn df_res_by_name(uc: &mut Emu) {
 
 pub fn df_res_by_id(uc: &mut Emu) {
     sync_foreign(uc);
-    let i = uc.arg(0);
+    let i = idx_of(uc, uc.get_data().rt.datapackage, uc.arg(0));
     let n = entries_opt(uc, None).len() as u32;
     let p = if i < n { res_ptr(uc, i as usize) } else { 0 };
     uc.ret(p);
@@ -675,7 +851,7 @@ pub fn res_ptr_by_name(uc: &Emu, name: &str) -> u32 {
 pub fn df_res_name_by_id(uc: &mut Emu) {
     sync_foreign(uc);
     let pkg = uc.get_data().rt.datapackage;
-    let i = uc.arg(0);
+    let i = idx_of(uc, pkg, uc.arg(0));
     let tbl = if pkg != 0 {
         uc.r32(pkg + off::FILE_NAME_TABLE)
     } else {

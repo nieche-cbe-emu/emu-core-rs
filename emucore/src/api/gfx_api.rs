@@ -205,7 +205,7 @@ pub fn img_from_res(uc: &mut Emu) {
     let raw = uc.read_upto(p, 64);
     if let Some(nul) = raw.iter().position(|&c| c == 0) {
         if nul > 0 && nul <= 48 {
-            let name = String::from_utf8_lossy(&raw[..nul]).to_string();
+            let name = crate::api::dfpkg::latin1(&raw[..nul]);
             let q = crate::api::dfpkg::res_ptr_by_name(uc, &name);
             if q != 0 {
                 uc.setreg(0, q);

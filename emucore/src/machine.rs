@@ -608,9 +608,10 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
 
 fn on_unmapped(uc: &mut Emu, t: MemType, addr: u64, size: usize, _v: i64) -> bool {
     let pc = uc.pc();
+    let lr = uc.lr();
     let d = uc.get_data_mut();
     if d.exit_reason.is_none() {
-        d.exit_reason = Some(format!("未映射{t:?} {addr:#x}+{size} pc={pc:#x}"));
+        d.exit_reason = Some(format!("未映射{t:?} {addr:#x}+{size} pc={pc:#x} lr={lr:#x}"));
     }
     let _ = uc.emu_stop();
     false
