@@ -18,7 +18,81 @@ pub struct Slot {
     pub off: u32,
 }
 
-pub const BUDGET: usize = 100_000_000;
+pub const CALL_TIMEOUT_MS: u64 = 5_000;
+
+extern "C" {
+
+    fn uc_emu_stop(uc: *mut core::ffi::c_void) -> i32;
+}
+
+fn mono_ms() -> u64 {
+    static BASE: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64 + 1
+}
+
+pub struct Watchdog {
+
+    deadline: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    quit: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    th: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn start(handle: usize) -> Watchdog {
+        use std::sync::atomic::Ordering::SeqCst;
+        use std::sync::atomic::{AtomicBool, AtomicU64};
+        use std::sync::Arc;
+        let deadline = Arc::new(AtomicU64::new(0));
+        let fired = Arc::new(AtomicBool::new(false));
+        let quit = Arc::new(AtomicBool::new(false));
+        let (d, f, q) = (deadline.clone(), fired.clone(), quit.clone());
+        let th = std::thread::Builder::new()
+            .name("nieche-watchdog".into())
+            .spawn(move || {
+                while !q.load(SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    let t = d.load(SeqCst);
+                    if t != 0 && mono_ms() >= t && d.compare_exchange(t, 0, SeqCst, SeqCst).is_ok() {
+                        f.store(true, SeqCst);
+                        unsafe {
+                            uc_emu_stop(handle as *mut core::ffi::c_void);
+                        }
+                    }
+                }
+            })
+            .ok();
+        Watchdog { deadline, fired, quit, th }
+    }
+
+    fn arm(&self) {
+        self.arm_for(CALL_TIMEOUT_MS);
+    }
+
+    fn arm_for(&self, ms: u64) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.fired.store(false, SeqCst);
+        self.deadline.store(mono_ms() + ms, SeqCst);
+    }
+
+    fn disarm(&self) {
+        self.deadline.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.deadline.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.quit.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(t) = self.th.take() {
+            let _ = t.join();
+        }
+    }
+}
 
 const SH_WRITEC: u32 = 0x03;
 const SH_WRITE0: u32 = 0x04;
@@ -65,6 +139,8 @@ pub struct State {
     pub auto_objs: HashMap<u32, u32>,
 
     pub rt: crate::runtime::Rt,
+
+    pub watchdog: Option<Watchdog>,
 }
 
 impl State {
@@ -278,6 +354,7 @@ pub fn build(m: &cbelib::CbeModule) -> Result<Emu<'static>, String> {
         auto_slots: std::collections::HashSet::new(),
         auto_objs: HashMap::new(),
         rt: crate::runtime::Rt::new(),
+        watchdog: None,
     };
 
     let mode = if le {
@@ -288,6 +365,8 @@ pub fn build(m: &cbelib::CbeModule) -> Result<Emu<'static>, String> {
     let mut uc = Unicorn::new_with_data(Arch::ARM, mode, st).map_err(|e| format!("{e:?}"))?;
 
     let _ = uc.ctl_set_cpu_model(unicorn_engine::ArmCpuModel::Model_926 as i32);
+    let h = uc.get_handle() as usize;
+    uc.get_data_mut().watchdog = Some(Watchdog::start(h));
 
     map_memory(&mut uc, m, &p)?;
     install_hooks(&mut uc)?;
@@ -492,23 +571,26 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
     })
     .map_err(e)?;
 
-    uc.add_mem_hook(
-        HookType::MEM_UNMAPPED,
-        0,
-        u64::MAX,
-        |uc: &mut Emu, t: MemType, addr: u64, size: usize, _v: i64| {
-            let pc = uc.pc();
-            let d = uc.get_data_mut();
-            if d.exit_reason.is_none() {
-                d.exit_reason = Some(format!(
-                    "未映射{t:?} {addr:#x}+{size} pc={pc:#x}"
-                ));
-            }
-            let _ = uc.emu_stop();
-            false
-        },
-    )
-    .map_err(e)?;
+    let mut regions: Vec<(u64, u64)> = uc
+        .mem_regions()
+        .map_err(e)?
+        .iter()
+        .map(|r| (r.begin, r.end))
+        .collect();
+    regions.sort();
+    let mut gaps = Vec::new();
+    let mut cur = 0u64;
+    for (b, end) in regions {
+        if b > cur {
+            gaps.push((cur, b - 1));
+        }
+        cur = end.saturating_add(1);
+    }
+    gaps.push((cur, u64::MAX));
+    for (b, end) in gaps {
+        uc.add_mem_hook(HookType::MEM_UNMAPPED, b, end, on_unmapped)
+            .map_err(e)?;
+    }
 
     uc.add_insn_invalid_hook(|uc: &mut Emu| {
         let pc = uc.pc();
@@ -522,6 +604,16 @@ fn install_hooks(uc: &mut Emu) -> Result<(), String> {
     .map_err(e)?;
 
     Ok(())
+}
+
+fn on_unmapped(uc: &mut Emu, t: MemType, addr: u64, size: usize, _v: i64) -> bool {
+    let pc = uc.pc();
+    let d = uc.get_data_mut();
+    if d.exit_reason.is_none() {
+        d.exit_reason = Some(format!("未映射{t:?} {addr:#x}+{size} pc={pc:#x}"));
+    }
+    let _ = uc.emu_stop();
+    false
 }
 
 fn host_error(uc: &mut Emu, idx: usize, payload: &(dyn std::any::Any + Send)) {
@@ -653,8 +745,11 @@ pub fn call(uc: &mut Emu, addr: u32, args: &[u32]) -> u32 {
         d.resume_pc = None;
     }
     let mut resumes = 0u32;
+    if let Some(w) = &uc.get_data().watchdog {
+        w.arm();
+    }
     loop {
-        let r = uc.emu_start(start as u64, RETURN_MAGIC as u64, 0, BUDGET);
+        let r = uc.emu_start(start as u64, RETURN_MAGIC as u64, 0, 0);
         if let Err(err) = r {
             let pc = uc.pc();
             let d = uc.get_data_mut();
@@ -665,6 +760,10 @@ pub fn call(uc: &mut Emu, addr: u32, args: &[u32]) -> u32 {
         }
         let next = uc.get_data_mut().resume_pc.take();
         let Some(n) = next else { break };
+
+        if uc.get_data().watchdog.as_ref().is_some_and(|w| w.fired()) {
+            break;
+        }
         start = n;
         set_thumb(uc, start & 1 != 0);
         resumes += 1;
@@ -673,7 +772,15 @@ pub fn call(uc: &mut Emu, addr: u32, args: &[u32]) -> u32 {
             break;
         }
     }
+    if let Some(w) = &uc.get_data().watchdog {
+        w.disarm();
+    }
     uc.get_data_mut().in_emu = false;
+    if uc.get_data().exit_reason.is_none() && (uc.pc() & !1) != (RETURN_MAGIC & !1) {
+
+        let pc = uc.pc();
+        uc.get_data_mut().exit_reason = Some(format!("单次调用超时 pc={pc:#x}"));
+    }
     if uc.get_data().exit_reason.is_none() {
 
         let r9 = uc.reg(9);
@@ -711,6 +818,21 @@ pub fn selftest() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watchdog_stops_infinite_loop() {
+        let mut uc = Unicorn::new(Arch::ARM, Mode::ARM | Mode::LITTLE_ENDIAN).unwrap();
+        uc.mem_map(0x1000, 0x1000, Prot::ALL).unwrap();
+        uc.mem_write(0x1000, &0xeaff_fffeu32.to_le_bytes()).unwrap();
+        let w = Watchdog::start(uc.get_handle() as usize);
+        w.arm_for(200);
+        let t0 = std::time::Instant::now();
+        uc.emu_start(0x1000, 0x2000, 0, 0).unwrap();
+        let dt = t0.elapsed().as_millis();
+        w.disarm();
+        assert!(w.fired(), "看门狗没有触发");
+        assert!((150..1500).contains(&dt), "停机用了 {dt}ms");
+    }
 
     fn blank_module() -> cbelib::CbeModule {
         cbelib::CbeModule {

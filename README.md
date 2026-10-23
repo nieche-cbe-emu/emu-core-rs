@@ -19,6 +19,7 @@ macOS、Windows、Android 三个外壳跑的都是这一份代码。
 
 - Rust 1.85 及以上（edition 2021）
 - CMake 与 Ninja（`unicorn-engine` 构建依赖）
+- 仓库所在路径不能含空格：`vendor/unicorn-engine-sys` 的 qemu `configure` 会拒绝
 
 ```bash
 cargo build --release
@@ -107,7 +108,7 @@ cargo test --release
 
 逐帧差分工具在 [emu-tools](https://github.com/nieche-cbe-emu/emu-tools)，
 参照实现是 [emu-core-py](https://github.com/nieche-cbe-emu/emu-core-py)。
-29 个模块语料上：60 帧完全一致 29/29，300 帧 29/29。
+35 个模块语料上：60 帧完全一致 35/35，300 帧 35/35。
 
 ## 说明
 
@@ -116,4 +117,5 @@ cargo test --release
 ## 许可证
 
 GPL-2.0，见 LICENSE。核心链接 unicorn（GPL-2.0），由它编出来的二进制只能按同样的条款分发。
+`vendor/unicorn-engine-sys` 是 unicorn 2.1.5 的源码副本，改动只有一处：TLB 填充时只在页上确有已翻译代码才标记为未写脏页（`qemu/accel/tcg/cputlb.c`、`translate-all.c`）。
 第三方组件逐项见 THIRD-PARTY.md。
