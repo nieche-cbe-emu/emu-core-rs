@@ -240,3 +240,29 @@ pub unsafe extern "C" fn nieche_cheat_lock(s: *mut Session, addr: u32, width: u3
         (*s).inner.cheat_lock(addr, width, value, on != 0);
     }
 }
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_mem_read(s: *mut Session, addr: u32, out: *mut u8, len: usize) -> usize {
+    if s.is_null() || out.is_null() {
+        return 0;
+    }
+    let s = &*s;
+    catch_unwind(AssertUnwindSafe(|| match s.inner.mem_read(addr, len) {
+        Some(v) => {
+            std::ptr::copy_nonoverlapping(v.as_ptr(), out, v.len());
+            v.len()
+        }
+        None => 0,
+    }))
+    .unwrap_or(0)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn nieche_mem_write(s: *mut Session, addr: u32, data: *const u8, len: usize) -> i32 {
+    if s.is_null() || data.is_null() {
+        return 0;
+    }
+    let s = &mut *s;
+    let buf = std::slice::from_raw_parts(data, len).to_vec();
+    catch_unwind(AssertUnwindSafe(|| s.inner.mem_write(addr, &buf) as i32)).unwrap_or(0)
+}

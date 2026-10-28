@@ -55,6 +55,9 @@ int32_t  nieche_cheat_write(NiecheSession *s, uint32_t addr, uint32_t width, int
 
 void     nieche_cheat_lock(NiecheSession *s, uint32_t addr, uint32_t width, int64_t value, int32_t on);
 
+size_t   nieche_mem_read(NiecheSession *s, uint32_t addr, uint8_t *out, size_t len);
+int32_t  nieche_mem_write(NiecheSession *s, uint32_t addr, const uint8_t *data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

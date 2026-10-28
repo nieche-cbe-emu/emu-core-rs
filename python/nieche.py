@@ -92,6 +92,8 @@ def _bind(lib):
         ("nieche_cheat_results", [p, c.POINTER(c.c_uint32), sz], sz),
         ("nieche_cheat_write", [p, c.c_uint32, c.c_uint32, c.c_int64], c.c_int32),
         ("nieche_cheat_lock", [p, c.c_uint32, c.c_uint32, c.c_int64, c.c_int32], None),
+        ("nieche_mem_read", [p, c.c_uint32, c.c_void_p, c.c_size_t], c.c_size_t),
+        ("nieche_mem_write", [p, c.c_uint32, c.c_char_p, c.c_size_t], c.c_int32),
     ]
     for name, argtypes, restype in sig:
         f = getattr(lib, name)
@@ -201,6 +203,15 @@ class NiecheSession:
 
     def cheat_lock(self, addr, width, value, on=True):
         self.lib.nieche_cheat_lock(self.h, int(addr), int(width), int(value), 1 if on else 0)
+
+    def mem_read(self, addr, n):
+        buf = (ctypes.c_ubyte * n)()
+        got = self.lib.nieche_mem_read(self.h, int(addr), buf, n)
+        return bytes(memoryview(buf)[:got])
+
+    def mem_write(self, addr, data):
+        data = bytes(data)
+        return self.lib.nieche_mem_write(self.h, int(addr), data, len(data)) == 1
 
     @property
     def size(self):

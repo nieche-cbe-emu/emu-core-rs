@@ -405,6 +405,14 @@ impl Session {
         crate::cheat::Cheat::write(&mut self.uc, addr, width, value)
     }
 
+    pub fn mem_read(&self, addr: u32, len: usize) -> Option<Vec<u8>> {
+        self.uc.mem_read_as_vec(addr as u64, len).ok()
+    }
+
+    pub fn mem_write(&mut self, addr: u32, data: &[u8]) -> bool {
+        self.uc.mem_write(addr as u64, data).is_ok()
+    }
+
     pub fn cheat_lock(&mut self, addr: u32, width: u32, value: i64, on: bool) {
         self.cheat.lock(addr, width, value, on);
     }
